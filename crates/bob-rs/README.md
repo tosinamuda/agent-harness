@@ -24,6 +24,47 @@ Key surface:
 - `read_api_key` / `write_api_key` / `resolve_api_key` → the bob API key
   in the OS keychain.
 
+## Example — run bob with a prompt
+
+```rust
+use std::sync::mpsc::sync_channel;
+use bob_rs::{spawn_bob, BobApprovalMode, BobChatMode, ProcessEvent, RunBobOptions};
+
+fn main() -> Result<(), String> {
+    // bob authenticates with an API key this SDK reads from the OS keychain;
+    // store it once with `bob_rs::write_api_key(..)`. `bob` must be on PATH.
+    let (tx, rx) = sync_channel::<ProcessEvent>(256);
+
+    let _handle = spawn_bob(
+        RunBobOptions {
+            prompt: "List the files in this directory.".into(),
+            chat_mode: BobChatMode::Ask,
+            approval_mode: BobApprovalMode::Default,
+            max_coins: 30,
+            cwd: None,             // defaults to the current directory
+            bob_executable: None,  // defaults to `bob` on PATH
+        },
+        "demo".into(),
+        move |ev| { let _ = tx.send(ev); }, // FnMut + Send + Sync + Clone
+    )?;
+
+    // bob-rs streams bob's stdout RAW — one JSON object per line from its
+    // `--output-format stream-json`. For a *normalized* event stream (text /
+    // thinking / tool calls), use the `agent-harness` crate, whose `bob`
+    // adapter parses these for you.
+    for ev in rx {
+        match ev {
+            ProcessEvent::Stdout { line, .. }      => println!("{line}"),
+            ProcessEvent::Stderr { line, .. }      => eprintln!("{line}"),
+            ProcessEvent::Error  { message, .. }   => eprintln!("error: {message}"),
+            ProcessEvent::Exited { exit_code, .. } => { eprintln!("(exit {exit_code:?})"); break; }
+            ProcessEvent::Started { .. }           => {}
+        }
+    }
+    Ok(())
+}
+```
+
 ## License
 
 Licensed under either of MIT or Apache-2.0 at your option.
