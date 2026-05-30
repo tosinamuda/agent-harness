@@ -1,0 +1,39 @@
+[package]
+name = "agent-harness"
+version = "0.1.0"
+edition = "2021"
+description = "Drive agent CLIs (Claude Code, Codex, bob) — or build your own — behind one Harness trait + normalized run events. The framework plus built-in adapters; imported as `harness`."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/tosinamuda/agent-harness"
+keywords = ["agent", "llm", "harness", "cli", "subprocess"]
+categories = ["command-line-utilities", "api-bindings"]
+
+# The harness umbrella: the framework (trait + RunEvent + open Registry,
+# re-exporting the engine from `cli-stream`) plus the built-in bob/claude/
+# codex adapters as feature-gated modules. Imported as `harness`
+# (`use harness::{Harness, Registry, Bob, Claude, Codex}`); with
+# `default-features = false` it's just the lean framework — no adapters,
+# no keyring.
+[lib]
+name = "harness"
+
+[features]
+default = ["bob", "claude", "codex"]
+# The bob adapter pulls in the bob SDK (keyring / tempfile / installer);
+# gating it keeps that weight off a claude/codex-only consumer.
+bob = ["dep:bob-rs"]
+# claude / codex own their CLI's login — no extra deps.
+claude = []
+codex = []
+
+[dependencies]
+# The generic subprocess engine (spawn / cancel / PATH augmentation) + the
+# ProcessEvent / InstallEvent shapes. Re-exported so adapters + consumers
+# reach the engine through this framework crate.
+cli-stream = { path = "../cli-stream", version = "0.1.0" }
+# The unofficial bob SDK — wrapped by the `bob` adapter module, so it's
+# optional + gated behind the `bob` feature.
+bob-rs = { path = "../bob-rs", version = "0.1.0", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

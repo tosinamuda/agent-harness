@@ -1,0 +1,223 @@
+//! The harness registry — an **open** builder so consumers compose their
+//! own set of harnesses (the built-ins *and/or* their own custom
+//! `impl Harness`), plus convenience constructors over the built-in
+//! adapters for hosts that just want "all of them".
+//!
+//! This is the extensibility seam: a third party adds a provider by
+//! implementing [`Harness`](crate::Harness) in their own crate and calling
+//! [`Registry::register`] — no fork of this crate required.
+
+use crate::{Harness, HarnessInfo};
+#[cfg(feature = "bob")]
+use crate::Bob;
+#[cfg(feature = "claude")]
+use crate::Claude;
+#[cfg(feature = "codex")]
+use crate::Codex;
+
+/// The identifier used when the caller doesn't pick one — the bob adapter,
+/// the conventional default. (A literal so it's available even in builds
+/// that compile without the `bob` feature; hosts override as needed.)
+pub const DEFAULT_HARNESS_ID: &str = "bob";
+
+/// An open set of harnesses. Build it with the ones you want — the
+/// built-ins (`Bob`/`Claude`/`Codex`) and/or your own:
+///
+/// ```no_run
+/// use harness::Registry;
+/// let reg = Registry::new()
+///     .register(harness::Bob::new());
+///     // .register(MyCustomHarness::new())   // your own impl Harness
+/// assert!(reg.by_id("bob").is_some());
+/// ```
+#[derive(Default)]
+pub struct Registry {
+    harnesses: Vec<Box<dyn Harness>>,
+}
+
+impl Registry {
+    /// An empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a harness. Chainable. Registration order is preserved (it's the
+    /// UI display order; the first registered is the conventional default).
+    pub fn register(mut self, harness: impl Harness + 'static) -> Self {
+        self.harnesses.push(Box::new(harness));
+        self
+    }
+
+    /// Resolve a harness by its [`HarnessInfo::id`].
+    pub fn by_id(&self, id: &str) -> Option<&dyn Harness> {
+        self.harnesses
+            .iter()
+            .map(Box::as_ref)
+            .find(|h| h.info().id == id)
+    }
+
+    /// Metadata for every registered harness, in registration order.
+    pub fn catalog(&self) -> Vec<HarnessInfo> {
+        self.harnesses.iter().map(|h| h.info()).collect()
+    }
+
+    /// The ids of every registered harness, in registration order.
+    pub fn ids(&self) -> Vec<String> {
+        self.harnesses.iter().map(|h| h.info().id).collect()
+    }
+}
+
+/// A [`Registry`] of the built-in adapters compiled into this build
+/// (bob / claude / codex), in display order.
+pub fn default_registry() -> Registry {
+    #[allow(unused_mut)]
+    let mut reg = Registry::new();
+    #[cfg(feature = "bob")]
+    {
+        reg = reg.register(Bob::new());
+    }
+    #[cfg(feature = "claude")]
+    {
+        reg = reg.register(Claude::new());
+    }
+    #[cfg(feature = "codex")]
+    {
+        reg = reg.register(Codex::new());
+    }
+    reg
+}
+
+/// Resolve a *built-in* harness by id, as an owned box — convenience for
+/// hosts that look one up per call. Returns `None` for an unknown id.
+pub fn harness_by_id(id: &str) -> Option<Box<dyn Harness>> {
+    let _ = id;
+    #[cfg(feature = "bob")]
+    {
+        if id == crate::BOB_HARNESS_ID {
+            return Some(Box::new(Bob::new()));
+        }
+    }
+    #[cfg(feature = "claude")]
+    {
+        if id == crate::CLAUDE_HARNESS_ID {
+            return Some(Box::new(Claude::new()));
+        }
+    }
+    #[cfg(feature = "codex")]
+    {
+        if id == crate::CODEX_HARNESS_ID {
+            return Some(Box::new(Codex::new()));
+        }
+    }
+    None
+}
+
+/// Metadata for every built-in harness — the payload the UI picker renders.
+pub fn harness_catalog() -> Vec<HarnessInfo> {
+    default_registry().catalog()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CredentialSpec, HarnessCapabilities, HarnessReadiness, InstallCallback, RunCallback,
+        RunHandle, RunRequest,
+    };
+
+    #[test]
+    fn default_registry_lists_bob_claude_codex_in_order() {
+        assert_eq!(default_registry().ids(), vec!["bob", "claude", "codex"]);
+        assert_eq!(default_registry().catalog()[0].id, DEFAULT_HARNESS_ID);
+    }
+
+    #[test]
+    fn harness_by_id_resolves_builtins_and_rejects_unknown() {
+        assert!(harness_by_id("bob").is_some());
+        assert!(harness_by_id("claude").is_some());
+        assert!(harness_by_id("codex").is_some());
+        assert!(harness_by_id("nope").is_none());
+    }
+
+    #[test]
+    fn capabilities_match_each_adapter_and_back_credential_required() {
+        let caps = |id: &str| harness_by_id(id).unwrap().info().capabilities;
+
+        let bob = caps("bob");
+        assert!(bob.credential_required && bob.previews_edits);
+        assert!(bob.models.is_empty() && !bob.supports_effort && !bob.supports_max_turns);
+        assert_eq!(
+            bob.credential_required,
+            harness_by_id("bob").unwrap().credential().required
+        );
+
+        let claude = caps("claude");
+        assert!(!claude.credential_required && !claude.previews_edits);
+        assert!(!claude.models.is_empty() && !claude.allows_custom_model);
+        assert!(claude.supports_max_turns && !claude.supports_effort);
+
+        let codex = caps("codex");
+        assert!(!codex.credential_required && !codex.previews_edits);
+        assert!(codex.allows_custom_model && codex.supports_effort && !codex.supports_max_turns);
+
+        assert!(claude.supports_login && codex.supports_login && !bob.supports_login);
+    }
+
+    // A third-party / custom provider — proves the registry is open: this
+    // type lives "outside" the built-ins yet registers + resolves the same.
+    struct Acme;
+    impl Harness for Acme {
+        fn info(&self) -> HarnessInfo {
+            HarnessInfo {
+                id: "acme".to_owned(),
+                display_name: "Acme".to_owned(),
+                description: "A custom third-party harness.".to_owned(),
+                requires_install: false,
+                capabilities: HarnessCapabilities {
+                    credential_required: false,
+                    previews_edits: false,
+                    models: Vec::new(),
+                    allows_custom_model: true,
+                    supports_effort: false,
+                    supports_max_turns: false,
+                    supports_login: false,
+                },
+            }
+        }
+        fn readiness(&self) -> HarnessReadiness {
+            HarnessReadiness {
+                harness_id: "acme".to_owned(),
+                ready: true,
+                installed: true,
+                version: None,
+                auth_configured: true,
+                error: None,
+                details: serde_json::Value::Null,
+            }
+        }
+        fn install(&self, _on_event: InstallCallback) -> Result<(), String> {
+            Ok(())
+        }
+        fn run(&self, _req: RunRequest, _on_event: RunCallback) -> Result<RunHandle, String> {
+            // A real API-backed harness would call its HTTP endpoint here and
+            // emit RunEvents through `on_event`; the dummy never runs.
+            Err("acme: run not implemented in test".to_owned())
+        }
+        fn credential(&self) -> CredentialSpec {
+            CredentialSpec {
+                label: "Acme key".to_owned(),
+                keychain_service: "acme".to_owned(),
+                keychain_account: "ACME_API_KEY".to_owned(),
+                required: false,
+            }
+        }
+    }
+
+    #[test]
+    fn custom_harness_registers_and_resolves_alongside_builtins() {
+        let reg = Registry::new().register(Bob::new()).register(Acme);
+        assert!(reg.by_id("bob").is_some());
+        assert!(reg.by_id("acme").is_some(), "custom harness must resolve");
+        assert_eq!(reg.ids(), vec!["bob", "acme"]);
+    }
+}

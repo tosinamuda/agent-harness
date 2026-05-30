@@ -1,0 +1,18 @@
+# agent-harness — a Rust framework for driving agent CLIs, with adapters.
+#
+# Crates (the dependency arrow only points up):
+#   * cli-stream    — generic streaming-subprocess engine: spawn a CLI,
+#                     stream stdout/stderr line-by-line, cancel
+#                     (SIGTERM→SIGKILL), and augment PATH so a Node-based
+#                     CLI resolves even from a packaged .app. No agent or
+#                     harness knowledge. [publishable]
+#   * bob-rs        — UNOFFICIAL Rust SDK for the `bob` agent CLI:
+#                     detection, install, OS keychain, spawn. → cli-stream.
+#                     Not affiliated with the bob maintainers. [publishable]
+#   * agent-harness — the framework (imported as `harness`): the `Harness`
+#                     trait + the normalized `RunEvent` vocabulary + an open
+#                     `Registry`, with feature-gated bob/claude/codex adapter
+#                     modules. → cli-stream + bob-rs (optional). [publishable]
+[workspace]
+resolver = "2"
+members = ["crates/cli-stream", "crates/bob-rs", "crates/agent-harness"]

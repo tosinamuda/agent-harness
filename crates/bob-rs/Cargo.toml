@@ -1,0 +1,41 @@
+[package]
+name = "bob-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Unofficial Rust SDK for the bob agent CLI — detection, install, keychain, run. Not affiliated with or endorsed by the bob maintainers."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/tosinamuda/agent-harness"
+keywords = ["bob", "agent", "cli", "sdk", "keychain"]
+categories = ["command-line-utilities"]
+
+# Pure library. No binaries, no Tauri, no axum — those live in the
+# crates that depend on this one (`src-tauri` and `bob-api`). The
+# goal is that this crate is the *only* place the actual logic
+# (probing PATH, spawning the install script, reading the keychain,
+# parsing bob's stream-json) is implemented.
+[lib]
+
+[dependencies]
+# The generic subprocess engine + event shapes bob-rs builds its
+# bob-specific spawn/install on top of. Depending on this leaf (not the
+# harness framework) is what keeps bob-rs a standalone SDK.
+cli-stream = { path = "../cli-stream", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# OS keychain access. macOS Keychain Access via `apple-native`,
+# libsecret on Linux, Credential Vault on Windows. Same crate
+# `src-tauri` already depends on — we'll move the dep into this
+# crate once `src-tauri` consumes us.
+keyring = { version = "3.6", features = ["apple-native"] }
+# Tempfile is needed to spool the embedded `install-bob.sh` to
+# disk before exec'ing it. The script ships as a string constant
+# (`include_str!`) so the consumer doesn't need to ship a separate
+# file at runtime.
+tempfile = "3"
+# Cross-platform app-data-dir resolution. Used by `keychain` to
+# store the sidecar marker file that lets us tell whether a key
+# is configured *without* touching the OS keychain at boot.
+dirs = "5"
+# (The SIGTERM/SIGKILL cancel + libc dep moved to agent-harness with the
+# streaming engine.)
