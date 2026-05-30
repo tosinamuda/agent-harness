@@ -21,8 +21,10 @@ use crate::{
 };
 
 pub mod parser;
+pub mod raw;
 
 pub use parser::{normalize_bob_event, parse_bob_line, BobStreamParser};
+pub use raw::parse_bob_raw;
 
 /// Registry id for the bob harness.
 pub const BOB_HARNESS_ID: &str = "bob";

@@ -50,7 +50,7 @@ pub mod registry;
 // The built-in adapters, re-exported as short names so consumers write
 // `use harness::{Bob, Claude, Codex}` — each gated behind its feature.
 #[cfg(feature = "bob")]
-pub use bob::{normalize_bob_event, BobHarness as Bob, BOB_HARNESS_ID};
+pub use bob::{normalize_bob_event, parse_bob_raw, BobHarness as Bob, BOB_HARNESS_ID};
 #[cfg(feature = "claude")]
 pub use claude::{ClaudeHarness as Claude, CLAUDE_HARNESS_ID};
 #[cfg(feature = "codex")]
