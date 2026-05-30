@@ -77,8 +77,24 @@ fn main() -> Result<(), String> {
 }
 ```
 
-> Auth is per-CLI: `claude` / `codex` use their own login; **bob** reads an
-> API key from the OS keychain (see [`bob-rs`](crates/bob-rs)).
+> **Auth is per-CLI.** `claude` / `codex` manage their own login; **bob**
+> reads `BOBSHELL_API_KEY` from the environment, else the OS keychain (see
+> [`bob-rs`](crates/bob-rs)).
+
+Not installed or signed in yet? The harness does both for you —
+[`examples/setup.rs`](crates/agent-harness/examples/setup.rs) shows the full,
+compile-checked version:
+
+```rust
+let h = harness::Claude::new();
+let r = h.readiness();                                 // installed? signed in?
+if !r.installed       { h.install(log.clone())?; }     // npm i -g @anthropic-ai/claude-code
+if !r.auth_configured { h.login(log)?; }               // `claude auth login` (opens browser)
+```
+
+`install()` uses npm for claude/codex (a bundled script for bob); `login()`
+runs the CLI's own OAuth (`claude auth login` / `codex login`). bob has no
+`login()` — store its key instead.
 
 Prefer to pick a harness by string id (e.g. from a config field)? Use the registry:
 

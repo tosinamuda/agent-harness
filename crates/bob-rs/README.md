@@ -21,8 +21,23 @@ Key surface:
 - `spawn_bob(opts, run_id, cb)` / `spawn_bob_raw(...)` → spawn a run,
   streaming `ProcessEvent`s (from the [`cli-stream`](../cli-stream) engine)
   until exit; returns a `ProcessHandle` for cancellation.
-- `read_api_key` / `write_api_key` / `resolve_api_key` → the bob API key
-  in the OS keychain.
+- `resolve_api_key()` → the bob API key, resolved as **`BOBSHELL_API_KEY`
+  from the environment first, else the OS keychain** (see *Authentication*).
+  `read_api_key` / `write_api_key` / `delete_api_key` manage the keychain
+  entry directly.
+
+## Authentication
+
+bob runs with a `BOBSHELL_API_KEY`. `resolve_api_key()` (used by `spawn_bob`)
+resolves it in this order:
+
+1. the **`BOBSHELL_API_KEY` environment variable** — shell-exported, or loaded
+   into the process env from a `.env` by *your* host (bob-rs does **not** parse
+   a `.env` file itself); then
+2. the **OS keychain** entry (`write_api_key` to store it there).
+
+The env var **wins** when both are set. So: export `BOBSHELL_API_KEY`, or call
+`bob_rs::write_api_key(&key)` once to persist it in the keychain.
 
 ## Example — run bob with a prompt
 
@@ -31,8 +46,8 @@ use std::sync::mpsc::sync_channel;
 use bob_rs::{spawn_bob, BobApprovalMode, BobChatMode, ProcessEvent, RunBobOptions};
 
 fn main() -> Result<(), String> {
-    // bob authenticates with an API key this SDK reads from the OS keychain;
-    // store it once with `bob_rs::write_api_key(..)`. `bob` must be on PATH.
+    // Auth: `BOBSHELL_API_KEY` — read from the env if set, else the OS
+    // keychain (store there once via `bob_rs::write_api_key`). `bob` on PATH.
     let (tx, rx) = sync_channel::<ProcessEvent>(256);
 
     let _handle = spawn_bob(

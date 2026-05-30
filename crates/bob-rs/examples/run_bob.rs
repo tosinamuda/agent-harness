@@ -1,7 +1,8 @@
 //! Spawn bob with a prompt and stream its raw stdout.
 //!
 //! `cargo run --example run_bob`
-//! (requires `bob` on PATH + an API key stored via `bob_rs::write_api_key`).
+//! (requires `bob` on PATH + a key: `BOBSHELL_API_KEY` in the env, or one
+//! stored in the OS keychain via `bob_rs::write_api_key`).
 //!
 //! bob-rs hands you bob's stdout RAW (one JSON object per line from its
 //! `--output-format stream-json`). For a *normalized* event stream, use the
