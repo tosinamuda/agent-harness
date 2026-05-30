@@ -1,12 +1,18 @@
 # agent-harness
 
-A small Rust framework for **driving existing agent CLIs** (bob, Claude
-Code, Codex, …) behind one interface — plus the adapters for them.
+**Use existing agent CLIs — the Claude Code CLI, Codex, bob — programmatically
+from Rust, behind one interface.**
+
+Instead of shelling out to `claude -p …` / `codex exec …` yourself and
+hand-parsing each tool's bespoke stream format, you drive them through one
+`Harness` trait and consume a single normalized `RunEvent` stream — text,
+reasoning ("thinking"), tool start/end, suggested edits, lifecycle — no
+matter which agent CLI is running underneath.
 
 > "Harness" as in: you put a harness on an existing thing to *drive* it.
-> This doesn't build an agent; it gives you one uniform way to run agent
-> CLIs you already have and stream their output as one normalized event
-> vocabulary.
+> This doesn't build an agent; it gives you one uniform, **programmatic**
+> way to run the agent CLIs you already have installed and stream their
+> output.
 
 ## Crates
 
@@ -23,7 +29,9 @@ The dependency arrow points up: `cli-stream` ← `bob-rs` ← `agent-harness`
 
 ```toml
 [dependencies]
-agent-harness = "0.1"   # the library is imported as `harness`
+# Not yet on crates.io — track the repo directly for now:
+agent-harness = { git = "https://github.com/tosinamuda/agent-harness" }
+# (the library is imported as `harness`)
 ```
 
 ```rust

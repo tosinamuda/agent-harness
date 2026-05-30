@@ -2,7 +2,7 @@
 name = "agent-harness"
 version = "0.1.0"
 edition = "2021"
-description = "Drive agent CLIs (Claude Code, Codex, bob) — or build your own — behind one Harness trait + normalized run events. The framework plus built-in adapters; imported as `harness`."
+description = "Use existing agent CLIs (Claude Code, Codex, bob) programmatically from Rust — or add your own — behind one Harness trait + a normalized run-event stream. Imported as `harness`."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/tosinamuda/agent-harness"
