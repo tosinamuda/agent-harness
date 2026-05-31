@@ -244,12 +244,17 @@ pub fn normalize_process_event(
 /// stable order: session (the run's init) → text → thinking → tool
 /// start/end → edits → usage (end of turn) → activity.
 ///
-/// Shared by [`normalize_process_event`] and by adapters that wrap the line
+/// Used by [`normalize_process_event`] and by adapters that wrap the line
 /// parser in their own per-run state (e.g. codex's preamble-vs-answer state
 /// machine, which decides *where* a message goes but still relies on this
 /// for everything else) — so the `ParsedLine` → `RunEvent` mapping lives in
 /// exactly one place.
-pub(crate) fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent> {
+///
+/// Public so an **out-of-tree** harness can build a stateful parser the same
+/// way: decide your own routing per line, then call this to expand a
+/// `ParsedLine` into events with the canonical ordering — instead of
+/// hand-rolling (and drifting from) the mapping. See `examples/custom_harness.rs`.
+pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent> {
     let mut out = Vec::new();
     if let Some(session) = parsed.session {
         out.push(RunEvent::Session {

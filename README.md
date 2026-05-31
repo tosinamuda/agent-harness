@@ -110,10 +110,16 @@ let h = reg.by_id("claude").expect("enabled");  // "bob" / "codex" / your own
 let info = h.info();
 ```
 
-### Bring your own provider
+## Extending
 
-The point of the framework: implement `Harness` in **your own crate** and
-register it — no fork required.
+Three ways to adapt the framework, by how much you're changing — all without
+forking it.
+
+### Add a new provider
+
+Implement `Harness` in **your own crate** and register it. `run()` just emits a
+normalized `RunEvent` stream, so a provider can spawn a CLI **or** call an HTTP
+API — there's no CLI requirement in the trait.
 
 ```rust
 use harness::{Harness, Registry};
@@ -121,12 +127,40 @@ use harness::{Harness, Registry};
 struct Acme;
 impl Harness for Acme { /* info / readiness / install / run / credential */ }
 
-let reg = Registry::new().register(Acme);
+let reg = harness::default_registry().register(Acme);   // built-ins + yours
 ```
 
-`Harness::run()` just emits a normalized `RunEvent` stream, so a provider
-can spawn a CLI (via `cli-stream`) **or** call an HTTP API — there is no
-CLI requirement in the trait.
+Reuse the pieces instead of reinventing them: `spawn_streaming` (the engine),
+then `normalize_process_event(event, your_parser)` for a stateless line parser,
+or `run_events_from_parsed` if your parser carries per-run state (the
+bob/codex shape). Full runnable example:
+[`examples/custom_harness.rs`](crates/agent-harness/examples/custom_harness.rs).
+
+### Extend an existing harness
+
+Rust favors composition over inheritance — so **wrap and delegate**: hold an
+inner harness, override the methods you want, forward the rest.
+
+```rust
+struct ClaudeWithDefaults { inner: harness::Claude }
+
+impl Harness for ClaudeWithDefaults {
+    fn info(&self) -> HarnessInfo { /* tweak the model list, etc. */ }
+    fn run(&self, req: RunRequest, cb: RunCallback) -> Result<RunHandle, String> {
+        self.inner.run(req, cb)            // reuse Claude's spawn + parser
+    }
+    // readiness / install / credential / login → forward to self.inner
+}
+```
+
+### Reinterpret the output
+
+To change what the events *mean* for your product — without touching any
+adapter — map `RunEvent`s into your own vocabulary in the consumer. (The
+Compose app does exactly this: it turns the neutral stream into its own
+three-surface chat model.) Faithful decode in the adapter, interpretation in
+the consumer — *normalize at the adapter, reinterpret in the consumer* — is the
+framework's keystone.
 
 ## Features
 
