@@ -162,6 +162,12 @@ three-surface chat model.) Faithful decode in the adapter, interpretation in
 the consumer — *normalize at the adapter, reinterpret in the consumer* — is the
 framework's keystone.
 
+For *full* control, drop below the neutral tier: `parse_raw_line(line)` decodes
+any harness's stdout line into untyped JSON (`serde_json::Value`), losslessly —
+so you can interpret a CLI's own events directly. It's harness-agnostic (one
+function for bob/claude/codex), and `ProcessEvent::Stdout` already hands you the
+verbatim line if you'd rather parse it yourself.
+
 ## Features
 
 Each built-in adapter is gated behind a Cargo feature

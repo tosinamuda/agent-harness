@@ -22,11 +22,14 @@
 
 pub mod events;
 pub mod harness;
+/// The untyped raw passthrough tier, harness-agnostic (any JSONL CLI).
+pub mod raw;
 
 pub use events::{
     normalize_process_event, run_events_from_parsed, ByteRange, ParsedLine, RunEvent, SessionInfo,
     SuggestedEdit, ToolCallEnd, ToolCallStart, UsageInfo,
 };
+pub use raw::parse_raw_line;
 pub use harness::{
     run_login_command, CredentialSpec, Harness, HarnessCapabilities, HarnessInfo, HarnessModel,
     HarnessReadiness, InstallCallback, ReasoningEffort, RunCallback, RunControl, RunHandle, RunMode,
@@ -50,7 +53,7 @@ pub mod registry;
 // The built-in adapters, re-exported as short names so consumers write
 // `use harness::{Bob, Claude, Codex}` — each gated behind its feature.
 #[cfg(feature = "bob")]
-pub use bob::{normalize_bob_event, parse_bob_raw, BobHarness as Bob, BOB_HARNESS_ID};
+pub use bob::{normalize_bob_event, BobHarness as Bob, BOB_HARNESS_ID};
 #[cfg(feature = "claude")]
 pub use claude::{ClaudeHarness as Claude, CLAUDE_HARNESS_ID};
 #[cfg(feature = "codex")]
