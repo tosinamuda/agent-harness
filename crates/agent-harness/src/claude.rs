@@ -27,7 +27,8 @@ use serde_json::Value;
 use crate::{
     normalize_process_event, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
     HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstallEvent, ParsedLine,
-    RunCallback, RunHandle, RunMode, RunRequest, RunTuning, ToolCallEnd, ToolCallStart,
+    RunCallback, RunHandle, RunMode, RunRequest, RunTuning, SessionInfo, ToolCallEnd,
+    ToolCallStart, UsageInfo,
 };
 
 /// Registry id for the Claude Code harness.
@@ -312,10 +313,19 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
                     if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
                         let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
+                        // In streaming mode the tool's arguments are NOT here:
+                        // `content_block_start` carries an empty `input: {}`,
+                        // and the real args arrive incrementally as
+                        // `input_json_delta` fragments. Reconstructing them
+                        // would mean accumulating partial JSON and delaying the
+                        // card — so leave `input: None` (honest: the card still
+                        // renders, just without args) rather than emit `{}`.
+                        // The tool's *output* is captured at tool_result below.
                         return ParsedLine {
                             tool_start: Some(ToolCallStart {
                                 tool_call_id: id.to_owned(),
                                 name: name.to_owned(),
+                                input: None,
                             }),
                             ..ParsedLine::default()
                         };
@@ -326,15 +336,27 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
             ParsedLine::default()
         }
         Some("system") => {
-            // Surface retry progress; ignore init + other system events.
-            if obj.get("subtype").and_then(Value::as_str) == Some("api_retry") {
-                let attempt = obj.get("attempt").and_then(Value::as_u64).unwrap_or(1);
-                return ParsedLine {
-                    activity: Some(format!("Retrying (attempt {attempt})…")),
+            match obj.get("subtype").and_then(Value::as_str) {
+                // init → session identity (id + model). Claude's first line
+                // in stream-json mode carries both.
+                Some("init") => ParsedLine {
+                    session: Some(SessionInfo {
+                        session_id: pick_str(obj, "session_id"),
+                        model: pick_str(obj, "model"),
+                    }),
                     ..ParsedLine::default()
-                };
+                },
+                // Surface retry progress.
+                Some("api_retry") => {
+                    let attempt = obj.get("attempt").and_then(Value::as_u64).unwrap_or(1);
+                    ParsedLine {
+                        activity: Some(format!("Retrying (attempt {attempt})…")),
+                        ..ParsedLine::default()
+                    }
+                }
+                // Other system events: ignored.
+                _ => ParsedLine::default(),
             }
-            ParsedLine::default()
         }
         Some("user") => {
             // Tool results arrive as a `user` message carrying
@@ -354,10 +376,14 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
                         if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
                             let is_error =
                                 block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                            // `content` is the tool's result — a string, or an
+                            // array of `{type:"text", text}` blocks.
+                            let output = block.get("content").and_then(claude_tool_result_text);
                             return ParsedLine {
                                 tool_end: Some(ToolCallEnd {
                                     tool_call_id: id.to_owned(),
                                     ok: !is_error,
+                                    output,
                                 }),
                                 ..ParsedLine::default()
                             };
@@ -367,9 +393,59 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
             }
             ParsedLine::default()
         }
-        // Aggregate assistant/result lines: text already streamed via
-        // deltas, so ignore to avoid double-counting.
+        // The final result line carries authoritative token usage. (Text
+        // already streamed via deltas, so we take only the usage here.)
+        Some("result") => {
+            let usage = obj.get("usage").and_then(Value::as_object);
+            let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(Value::as_u64);
+            let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(Value::as_u64);
+            if input_tokens.is_none() && output_tokens.is_none() {
+                return ParsedLine::default();
+            }
+            // Claude reports input/output separately; derive the total.
+            let total_tokens = match (input_tokens, output_tokens) {
+                (Some(i), Some(o)) => Some(i + o),
+                _ => None,
+            };
+            ParsedLine {
+                usage: Some(UsageInfo {
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                }),
+                ..ParsedLine::default()
+            }
+        }
+        // Aggregate assistant lines: text already streamed via deltas, so
+        // ignore to avoid double-counting.
         _ => ParsedLine::default(),
+    }
+}
+
+/// Non-empty string field of `obj`, else `None`.
+fn pick_str(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+/// A Claude `tool_result.content` rendered as text: a string verbatim, or
+/// the concatenated `text` of an array of content blocks. `None` if empty
+/// or an unrecognized shape.
+fn claude_tool_result_text(content: &Value) -> Option<String> {
+    match content {
+        Value::String(s) => (!s.is_empty()).then(|| s.clone()),
+        Value::Array(items) => {
+            let mut text = String::new();
+            for item in items {
+                if let Some(t) = item.get("text").and_then(Value::as_str) {
+                    text.push_str(t);
+                }
+            }
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
     }
 }
 
@@ -445,6 +521,7 @@ mod tests {
         let end = parse_claude_line(&ok_line).tool_end.expect("tool_end");
         assert_eq!(end.tool_call_id, "toolu_1");
         assert!(end.ok);
+        assert_eq!(end.output.as_deref(), Some("ok")); // tool_result.content lifted
 
         let err_line = serde_json::json!({
             "type": "user",
@@ -469,13 +546,18 @@ mod tests {
     }
 
     #[test]
-    fn init_and_aggregate_lines_are_ignored() {
-        // system/init
-        assert!(parse_claude_line(
-            &serde_json::json!({ "type": "system", "subtype": "init", "model": "x" }).to_string()
-        )
-        .text
-        .is_none());
+    fn system_init_yields_session() {
+        let line = serde_json::json!({
+            "type": "system", "subtype": "init", "session_id": "sess-abc", "model": "claude-x"
+        })
+        .to_string();
+        let session = parse_claude_line(&line).session.expect("session");
+        assert_eq!(session.session_id.as_deref(), Some("sess-abc"));
+        assert_eq!(session.model.as_deref(), Some("claude-x"));
+    }
+
+    #[test]
+    fn aggregate_and_empty_result_lines_are_ignored() {
         // aggregate assistant message — text already came via deltas
         let assistant = serde_json::json!({
             "type": "assistant",
@@ -484,12 +566,25 @@ mod tests {
         .to_string();
         let parsed = parse_claude_line(&assistant);
         assert!(parsed.text.is_none() && parsed.activity.is_none());
-        // result line
+        // result line without usage → nothing
         assert!(parse_claude_line(
             &serde_json::json!({ "type": "result", "subtype": "success", "is_error": false }).to_string()
         )
-        .text
-        .is_none());
+        .is_empty());
+    }
+
+    #[test]
+    fn result_with_usage_yields_usage() {
+        let line = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "usage": { "input_tokens": 120, "output_tokens": 30, "cache_read_input_tokens": 5 }
+        })
+        .to_string();
+        let usage = parse_claude_line(&line).usage.expect("usage");
+        assert_eq!(usage.input_tokens, Some(120));
+        assert_eq!(usage.output_tokens, Some(30));
+        assert_eq!(usage.total_tokens, Some(150)); // derived = input + output
     }
 
     #[test]

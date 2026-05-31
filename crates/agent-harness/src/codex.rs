@@ -27,7 +27,7 @@ use serde_json::{Map, Value};
 use crate::{
     normalize_process_event, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
     HarnessInfo, HarnessReadiness, InstallCallback, InstallEvent, ParsedLine, RunCallback,
-    RunHandle, RunMode, RunRequest, RunTuning, ToolCallEnd, ToolCallStart,
+    RunHandle, RunMode, RunRequest, RunTuning, SessionInfo, ToolCallEnd, ToolCallStart, UsageInfo,
 };
 
 /// Registry id for the Codex harness.
@@ -242,6 +242,34 @@ fn codex_tool_label(item: &Map<String, Value>) -> Option<String> {
     }
 }
 
+/// The tool call's input, lifted inline. Only `command_execution`
+/// carries a literal we can ground against (`command`); other item
+/// types stream/structure their args differently, so leave them `None`
+/// rather than guess.
+fn codex_tool_input(item: &Map<String, Value>) -> Option<String> {
+    if item.get("type").and_then(Value::as_str) == Some("command_execution") {
+        return item
+            .get("command")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+    }
+    None
+}
+
+/// The tool call's output, lifted inline. `command_execution` reports
+/// `aggregated_output`; other item types are left `None`.
+fn codex_tool_output(item: &Map<String, Value>) -> Option<String> {
+    if item.get("type").and_then(Value::as_str) == Some("command_execution") {
+        return item
+            .get("aggregated_output")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+    }
+    None
+}
+
 /// Did a codex tool item succeed? `command_execution` reports
 /// `exit_code` (0 = ok); otherwise fall back to `status` (anything but
 /// an explicit failure is treated as ok, since not every tool type
@@ -308,10 +336,12 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
                             tool_start: Some(ToolCallStart {
                                 tool_call_id: id.clone(),
                                 name: label,
+                                input: codex_tool_input(item),
                             }),
                             tool_end: Some(ToolCallEnd {
                                 tool_call_id: id,
                                 ok: codex_tool_ok(item),
+                                output: codex_tool_output(item),
                             }),
                             ..ParsedLine::default()
                         }
@@ -338,6 +368,7 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
                         tool_start: Some(ToolCallStart {
                             tool_call_id: id.to_owned(),
                             name: label,
+                            input: codex_tool_input(item),
                         }),
                         ..ParsedLine::default()
                     },
@@ -359,8 +390,41 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
                 ..ParsedLine::default()
             }
         }
-        // thread.started / turn.started / turn.completed / turn.failed
-        // and item.updated: lifecycle / partials — ignored.
+        // thread.started → session. Codex gives a `thread_id` (its session)
+        // but no model in this event, so `model` stays None.
+        Some("thread.started") => ParsedLine {
+            session: Some(SessionInfo {
+                session_id: obj
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                model: None,
+            }),
+            ..ParsedLine::default()
+        },
+        // turn.completed → token usage (codex reports input/output tokens).
+        Some("turn.completed") => {
+            let usage = obj.get("usage").and_then(Value::as_object);
+            let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(Value::as_u64);
+            let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(Value::as_u64);
+            if input_tokens.is_none() && output_tokens.is_none() {
+                return ParsedLine::default();
+            }
+            let total_tokens = match (input_tokens, output_tokens) {
+                (Some(i), Some(o)) => Some(i + o),
+                _ => None,
+            };
+            ParsedLine {
+                usage: Some(UsageInfo {
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                }),
+                ..ParsedLine::default()
+            }
+        }
+        // turn.started / turn.failed / item.updated: lifecycle / partials — ignored.
         _ => ParsedLine::default(),
     }
 }
@@ -416,6 +480,9 @@ mod tests {
         assert_eq!(start.tool_call_id, "item_2");
         assert_eq!(end.tool_call_id, "item_2");
         assert_eq!(start.name, "Running: bash -lc 'echo hi'");
+        // The command is lifted as input; aggregated_output as output.
+        assert_eq!(start.input.as_deref(), Some("bash -lc 'echo hi'"));
+        assert_eq!(end.output.as_deref(), Some("hi\n"));
         assert!(end.ok, "exit_code 0 → ok");
         assert!(parsed.activity.is_none());
         assert!(parsed.text.is_none());
@@ -448,7 +515,9 @@ mod tests {
         })
         .to_string();
         let parsed = parse_codex_line(&line);
-        assert_eq!(parsed.tool_start.expect("start").name, "Running: bash -lc ls");
+        let start = parsed.tool_start.expect("start");
+        assert_eq!(start.name, "Running: bash -lc ls");
+        assert_eq!(start.input.as_deref(), Some("bash -lc ls")); // input known at start
         assert!(parsed.tool_end.is_none(), "started → running (no end yet)");
         assert!(parsed.activity.is_none());
     }
@@ -468,15 +537,25 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_events_are_ignored() {
-        for line in [
-            r#"{"type":"thread.started","thread_id":"abc"}"#,
-            r#"{"type":"turn.started"}"#,
-            r#"{"type":"turn.completed","usage":{"input_tokens":1}}"#,
-        ] {
-            let parsed = parse_codex_line(line);
-            assert!(parsed.text.is_none() && parsed.activity.is_none());
-        }
+    fn thread_started_yields_session_and_turn_completed_yields_usage() {
+        // thread.started → Session (thread id; codex reports no model here).
+        let session = parse_codex_line(r#"{"type":"thread.started","thread_id":"abc"}"#)
+            .session
+            .expect("session");
+        assert_eq!(session.session_id.as_deref(), Some("abc"));
+        assert_eq!(session.model, None);
+
+        // turn.completed → Usage.
+        let usage =
+            parse_codex_line(r#"{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":40}}"#)
+                .usage
+                .expect("usage");
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(40));
+        assert_eq!(usage.total_tokens, Some(140));
+
+        // turn.started remains pure lifecycle.
+        assert!(parse_codex_line(r#"{"type":"turn.started"}"#).is_empty());
     }
 
     #[test]

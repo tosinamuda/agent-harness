@@ -6,8 +6,9 @@ from Rust, behind one interface.**
 Instead of shelling out to `claude -p …` / `codex exec …` yourself and
 hand-parsing each tool's bespoke stream format, you drive them through one
 `Harness` trait and consume a single normalized `RunEvent` stream — text,
-reasoning ("thinking"), tool start/end, suggested edits, lifecycle — no
-matter which agent CLI is running underneath.
+reasoning ("thinking"), tool start/end (with input/output), session + token
+usage, suggested edits, lifecycle — no matter which agent CLI is running
+underneath.
 
 > "Harness" as in: you put a harness on an existing thing to *drive* it.
 > This doesn't build an agent; it gives you one uniform, **programmatic**

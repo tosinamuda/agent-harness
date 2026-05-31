@@ -24,8 +24,8 @@ pub mod events;
 pub mod harness;
 
 pub use events::{
-    normalize_process_event, ByteRange, ParsedLine, RunEvent, SuggestedEdit, ToolCallEnd,
-    ToolCallStart,
+    normalize_process_event, ByteRange, ParsedLine, RunEvent, SessionInfo, SuggestedEdit,
+    ToolCallEnd, ToolCallStart, UsageInfo,
 };
 pub use harness::{
     run_login_command, CredentialSpec, Harness, HarnessCapabilities, HarnessInfo, HarnessModel,

@@ -43,20 +43,29 @@ pub struct SuggestedEdit {
 }
 
 /// A tool call beginning — its id + name, so the UI can render a
-/// state-ful card (running → done/✗) keyed by `tool_call_id`.
+/// state-ful card (running → done/✗) keyed by `tool_call_id`. `input`
+/// carries the call's arguments when the harness delivers them inline
+/// at the start (bob's `parameters`, codex's `command`); it is `None`
+/// when the harness streams them incrementally (Claude's
+/// `input_json_delta`), so the card stays correct either way.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallStart {
     pub tool_call_id: String,
     pub name: String,
+    pub input: Option<String>,
 }
 
 /// A tool call finishing — matched to its start by `tool_call_id`.
+/// `output` carries the tool's result when the harness reports it
+/// inline at completion (bob's `tool_result.output`, codex's
+/// `aggregated_output`, Claude's `tool_result.content`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallEnd {
     pub tool_call_id: String,
     pub ok: bool,
+    pub output: Option<String>,
 }
 
 /// The normalized event stream. `#[serde(tag = "kind")]` +
@@ -70,8 +79,23 @@ pub struct ToolCallEnd {
 // snake_case Rust idents.
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum RunEvent {
-    /// First event, before any output. UI shows "thinking…".
+    /// First event, before any output. UI shows "thinking…". Fired the
+    /// instant the process spawns — *before* the CLI reports its
+    /// session/model, which arrive separately as [`RunEvent::Session`].
     Started { run_id: String },
+    /// The agent session is established — its id and the model in use.
+    /// Distinct from `Started` because it arrives a beat later, in the
+    /// CLI's first output line (bob's `init`, Claude's `system/init`,
+    /// codex's `thread.started`); keeping `Started` instant matters for
+    /// the "thinking…" feedback. Either field may be absent when the CLI
+    /// doesn't report it (e.g. codex gives a thread id but no model).
+    Session {
+        run_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
     /// A chunk of assistant text. Appended to the active message.
     Text { run_id: String, delta: String },
     /// A chunk of model reasoning ("thinking"), rendered distinctly from
@@ -79,16 +103,23 @@ pub enum RunEvent {
     /// answer (e.g. Claude's `thinking_delta`).
     Thinking { run_id: String, delta: String },
     /// A tool call started — render a state-ful card keyed by id.
+    /// `input` is the call's arguments when delivered inline (omitted
+    /// from the wire when absent, e.g. Claude streams them separately).
     ToolStart {
         run_id: String,
         tool_call_id: String,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
     },
-    /// A tool call finished (matched to its start by id).
+    /// A tool call finished (matched to its start by id). `output` is the
+    /// tool's result when the harness reports it inline (omitted when absent).
     ToolEnd {
         run_id: String,
         tool_call_id: String,
         ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
     },
     /// One or more proposed edits. The app prepares + previews them.
     SuggestedEdits {
@@ -98,6 +129,20 @@ pub enum RunEvent {
     /// A human-readable status line (tool call, file touch, edit
     /// count). Replaces the message's transient activity text.
     Activity { run_id: String, message: String },
+    /// Token accounting for the run, emitted near its end (from the
+    /// CLI's `result` / `turn.completed`). Neutral tokens only —
+    /// harness-specific costs/credits (bob's coins) are NOT here; a
+    /// consumer that wants them reads the harness's own output. Any
+    /// field may be absent when the CLI doesn't break usage down.
+    Usage {
+        run_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_tokens: Option<u64>,
+    },
     /// Spawn / IO / parse failure. Terminal — followed by `Exited`.
     Error { run_id: String, message: String },
     /// The run finished. Sent exactly once.
@@ -108,6 +153,21 @@ pub enum RunEvent {
     },
 }
 
+/// Session identity decoded from a harness's init line → `RunEvent::Session`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub session_id: Option<String>,
+    pub model: Option<String>,
+}
+
+/// Token accounting decoded from a harness's result line → `RunEvent::Usage`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UsageInfo {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
 /// What a single harness output line decoded to. A line can yield
 /// text *and* edits at once, so this is not one-event-per-line.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -116,11 +176,15 @@ pub struct ParsedLine {
     /// Model reasoning chunk → `RunEvent::Thinking`. Kept separate from
     /// `text` so the UI can render it distinctly.
     pub thinking: Option<String>,
+    /// Session identity (id + model) → `RunEvent::Session`.
+    pub session: Option<SessionInfo>,
     /// A tool call began → `RunEvent::ToolStart`.
     pub tool_start: Option<ToolCallStart>,
     /// A tool call finished → `RunEvent::ToolEnd`.
     pub tool_end: Option<ToolCallEnd>,
     pub edits: Vec<SuggestedEdit>,
+    /// Token accounting → `RunEvent::Usage`.
+    pub usage: Option<UsageInfo>,
     pub activity: Option<String>,
 }
 
@@ -131,9 +195,11 @@ impl ParsedLine {
     pub fn is_empty(&self) -> bool {
         self.text.is_none()
             && self.thinking.is_none()
+            && self.session.is_none()
             && self.tool_start.is_none()
             && self.tool_end.is_none()
             && self.edits.is_empty()
+            && self.usage.is_none()
             && self.activity.is_none()
     }
 }
@@ -173,6 +239,14 @@ pub fn normalize_process_event(
         ProcessEvent::Stdout { run_id, line } => {
             let parsed = parse_line(&line);
             let mut out = Vec::new();
+            // Session leads (it's the run's init); usage trails (end-of-turn).
+            if let Some(session) = parsed.session {
+                out.push(RunEvent::Session {
+                    run_id: run_id.clone(),
+                    session_id: session.session_id,
+                    model: session.model,
+                });
+            }
             if let Some(text) = parsed.text {
                 out.push(RunEvent::Text {
                     run_id: run_id.clone(),
@@ -190,6 +264,7 @@ pub fn normalize_process_event(
                     run_id: run_id.clone(),
                     tool_call_id: start.tool_call_id,
                     name: start.name,
+                    input: start.input,
                 });
             }
             if let Some(end) = parsed.tool_end {
@@ -197,12 +272,21 @@ pub fn normalize_process_event(
                     run_id: run_id.clone(),
                     tool_call_id: end.tool_call_id,
                     ok: end.ok,
+                    output: end.output,
                 });
             }
             if !parsed.edits.is_empty() {
                 out.push(RunEvent::SuggestedEdits {
                     run_id: run_id.clone(),
                     edits: parsed.edits,
+                });
+            }
+            if let Some(usage) = parsed.usage {
+                out.push(RunEvent::Usage {
+                    run_id: run_id.clone(),
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    total_tokens: usage.total_tokens,
                 });
             }
             if let Some(activity) = parsed.activity {
@@ -319,6 +403,119 @@ mod tests {
         assert_eq!(json["runId"], "r1");
         assert_eq!(json["exitCode"], 2);
         assert_eq!(json["cancelled"], true);
+    }
+
+    #[test]
+    fn session_normalizes_and_serializes() {
+        let events = normalize_process_event(
+            ProcessEvent::Stdout {
+                run_id: "r1".to_owned(),
+                line: "ignored".to_owned(),
+            },
+            |_| ParsedLine {
+                session: Some(SessionInfo {
+                    session_id: Some("sess-1".to_owned()),
+                    model: Some("opus".to_owned()),
+                }),
+                ..ParsedLine::default()
+            },
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [RunEvent::Session { run_id, session_id, model }]
+                if run_id == "r1"
+                    && session_id.as_deref() == Some("sess-1")
+                    && model.as_deref() == Some("opus")
+        ));
+        let json = serde_json::to_value(RunEvent::Session {
+            run_id: "r1".to_owned(),
+            session_id: Some("sess-1".to_owned()),
+            model: None,
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "session");
+        assert_eq!(json["sessionId"], "sess-1");
+        // model omitted from the wire when None (backward-compatible).
+        assert!(json.get("model").is_none());
+    }
+
+    #[test]
+    fn usage_normalizes_and_serializes() {
+        let events = normalize_process_event(
+            ProcessEvent::Stdout {
+                run_id: "r1".to_owned(),
+                line: "ignored".to_owned(),
+            },
+            |_| ParsedLine {
+                usage: Some(UsageInfo {
+                    input_tokens: Some(10),
+                    output_tokens: Some(20),
+                    total_tokens: Some(30),
+                }),
+                ..ParsedLine::default()
+            },
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [RunEvent::Usage { run_id, input_tokens: Some(10), output_tokens: Some(20), total_tokens: Some(30) }]
+                if run_id == "r1"
+        ));
+        let json = serde_json::to_value(RunEvent::Usage {
+            run_id: "r1".to_owned(),
+            input_tokens: Some(10),
+            output_tokens: None,
+            total_tokens: Some(30),
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "usage");
+        assert_eq!(json["inputTokens"], 10);
+        assert_eq!(json["totalTokens"], 30);
+        assert!(json.get("outputTokens").is_none()); // omitted when None
+    }
+
+    #[test]
+    fn tool_io_is_carried_and_omitted_when_absent() {
+        // input on ToolStart, output on ToolEnd — distinct events, distinct moments.
+        let start = normalize_process_event(
+            ProcessEvent::Stdout {
+                run_id: "r1".to_owned(),
+                line: "ignored".to_owned(),
+            },
+            |_| ParsedLine {
+                tool_start: Some(ToolCallStart {
+                    tool_call_id: "t1".to_owned(),
+                    name: "ls".to_owned(),
+                    input: Some("{\"dir\":\"/x\"}".to_owned()),
+                }),
+                ..ParsedLine::default()
+            },
+        );
+        assert!(matches!(
+            start.as_slice(),
+            [RunEvent::ToolStart { input: Some(i), .. }] if i == "{\"dir\":\"/x\"}"
+        ));
+        // A ToolStart with no input omits the field on the wire (byte-identical
+        // to the pre-enrichment shape).
+        let json = serde_json::to_value(RunEvent::ToolStart {
+            run_id: "r1".to_owned(),
+            tool_call_id: "t1".to_owned(),
+            name: "ls".to_owned(),
+            input: None,
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "toolStart");
+        assert_eq!(json["toolCallId"], "t1");
+        assert!(json.get("input").is_none());
+
+        let json = serde_json::to_value(RunEvent::ToolEnd {
+            run_id: "r1".to_owned(),
+            tool_call_id: "t1".to_owned(),
+            ok: true,
+            output: Some("done".to_owned()),
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "toolEnd");
+        assert_eq!(json["output"], "done");
     }
 
     #[test]

@@ -11,14 +11,14 @@
 use serde_json::Value;
 
 use crate::{
-    normalize_process_event, ByteRange, ParsedLine, ProcessEvent, RunEvent, SuggestedEdit,
-    ToolCallEnd, ToolCallStart,
+    normalize_process_event, ByteRange, ParsedLine, ProcessEvent, RunEvent, SessionInfo,
+    SuggestedEdit, ToolCallEnd, ToolCallStart, UsageInfo,
 };
 
 /// bob's adapter-side normalization: parse bob's `--output-format
 /// stream-json` stdout via [`parse_bob_line`].
 pub fn normalize_bob_event(event: ProcessEvent) -> Vec<RunEvent> {
-    normalize_process_event(event, |line| parse_bob_line(line))
+    normalize_process_event(event, parse_bob_line)
 }
 
 /// Parse one line of bob's `--output-format stream-json` into the shared
@@ -97,23 +97,56 @@ pub fn parse_bob_line(line: &str) -> ParsedLine {
                 };
             }
             let tool_call_id = pick_string(record, "tool_id").unwrap_or_default();
+            // The call's arguments, lifted verbatim (parameters object →
+            // compact JSON) so the UI can show what the tool was asked to do.
+            let input = record.get("parameters").map(value_to_display_string);
             ParsedLine {
-                tool_start: Some(ToolCallStart { tool_call_id, name }),
+                tool_start: Some(ToolCallStart { tool_call_id, name, input }),
                 ..ParsedLine::default()
             }
         }
         // Tool call end → ToolEnd, matched by tool_id; ok unless the
-        // status is explicitly "error".
+        // status is explicitly "error". `output` carries the tool's result.
         Some("tool_result") => {
             let tool_call_id = pick_string(record, "tool_id").unwrap_or_default();
             let ok = record.get("status").and_then(Value::as_str) != Some("error");
+            let output = record
+                .get("output")
+                .map(value_to_display_string)
+                .filter(|s| !s.is_empty());
             ParsedLine {
-                tool_end: Some(ToolCallEnd { tool_call_id, ok }),
+                tool_end: Some(ToolCallEnd { tool_call_id, ok, output }),
                 ..ParsedLine::default()
             }
         }
-        // init / result and anything else: lifecycle / unknown. Fall back
-        // to the legacy suggested-edits heuristic so nothing regresses.
+        // init → session identity (id + model), arriving a beat after the
+        // engine's `Started`.
+        Some("init") => ParsedLine {
+            session: Some(SessionInfo {
+                session_id: pick_string(record, "session_id"),
+                model: pick_string(record, "model"),
+            }),
+            ..ParsedLine::default()
+        },
+        // result → token usage. bob reports a single `total_tokens` in
+        // `stats` (no input/output split); coins (`session_costs`) are
+        // bob-specific and intentionally NOT lifted into the neutral Usage.
+        Some("result") => {
+            let total_tokens = record
+                .get("stats")
+                .and_then(Value::as_object)
+                .and_then(|s| s.get("total_tokens"))
+                .and_then(Value::as_u64);
+            ParsedLine {
+                usage: total_tokens.map(|t| UsageInfo {
+                    total_tokens: Some(t),
+                    ..UsageInfo::default()
+                }),
+                ..ParsedLine::default()
+            }
+        }
+        // Anything else: unknown. Fall back to the legacy suggested-edits
+        // heuristic so a bob build that emits edit arrays still surfaces them.
         _ => {
             let edits = parse_suggested_edits(record);
             if edits.is_empty() {
@@ -201,6 +234,18 @@ impl BobStreamParser {
             (!text.is_empty()).then_some(text),
             (!thinking.is_empty()).then_some(thinking),
         )
+    }
+}
+
+/// Render a JSON value as a display string for a tool's `input`/`output`:
+/// a JSON string is taken verbatim (no surrounding quotes); any other shape
+/// (object / array / number) is serialized compactly. Lets the adapter lift
+/// bob's `parameters` / `tool_result.output` into the neutral layer without
+/// imposing a schema on them.
+fn value_to_display_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -346,6 +391,8 @@ mod tests {
         let start = parsed.tool_start.expect("tool_start");
         assert_eq!(start.tool_call_id, "tool-1");
         assert_eq!(start.name, "execute_command");
+        // The parameters object is lifted verbatim as the call's input.
+        assert_eq!(start.input.as_deref(), Some(r#"{"command":"ls"}"#));
         assert!(parsed.activity.is_none());
     }
 
@@ -370,6 +417,8 @@ mod tests {
         .expect("tool_end");
         assert_eq!(ok.tool_call_id, "tool-1");
         assert!(ok.ok);
+        // The tool's result is lifted as the end event's output.
+        assert_eq!(ok.output.as_deref(), Some("done"));
 
         let err = parse_bob_line(
             r#"{"type":"tool_result","tool_id":"tool-2","status":"error","output":"boom"}"#,
@@ -380,12 +429,26 @@ mod tests {
     }
 
     #[test]
-    fn init_and_result_lifecycle_are_ignored() {
-        assert!(parse_bob_line(r#"{"type":"init","session_id":"s1","model":"premium"}"#).is_empty());
-        assert!(parse_bob_line(
-            r#"{"type":"result","status":"success","stats":{"total_tokens":1}}"#
-        )
-        .is_empty());
+    fn init_yields_session_and_result_yields_usage() {
+        // init → Session (id + model); no text/tool content.
+        let init = parse_bob_line(r#"{"type":"init","session_id":"s1","model":"premium"}"#);
+        let session = init.session.expect("session");
+        assert_eq!(session.session_id.as_deref(), Some("s1"));
+        assert_eq!(session.model.as_deref(), Some("premium"));
+        assert!(init.text.is_none() && init.tool_start.is_none());
+
+        // result → Usage (neutral tokens only; coins stay bob-specific).
+        let result = parse_bob_line(
+            r#"{"type":"result","status":"success","stats":{"total_tokens":1280,"session_costs":3,"tool_calls":2}}"#,
+        );
+        let usage = result.usage.expect("usage");
+        assert_eq!(usage.total_tokens, Some(1280));
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+
+        // A result with no token count → no usage (nothing to report).
+        assert!(parse_bob_line(r#"{"type":"result","status":"success","stats":{"tool_calls":2}}"#)
+            .is_empty());
     }
 
     #[test]
@@ -473,9 +536,13 @@ mod tests {
         // Verbatim shapes captured from `bob 1.0.4 -o stream-json`
         // (timestamps trimmed) — locks the parser to bob's real format.
         let mut parser = BobStreamParser::default();
-        assert!(parser
+        // init → Session (id + model), not empty.
+        let session = parser
             .parse_line(r#"{"type":"init","session_id":"s","model":"premium"}"#)
-            .is_empty());
+            .session
+            .expect("session");
+        assert_eq!(session.session_id.as_deref(), Some("s"));
+        assert_eq!(session.model.as_deref(), Some("premium"));
         // Echoed user prompt → skipped.
         assert!(parser
             .parse_line(r#"{"type":"message","role":"user","content":"list files"}"#)
@@ -493,19 +560,21 @@ mod tests {
         let _ = parser.parse_line(
             r#"{"type":"message","role":"assistant","content":"</thinking>\n","delta":true}"#,
         );
-        // Real tool_use (list_files) → ToolStart.
+        // Real tool_use (list_files) → ToolStart, parameters lifted as input.
         let start = parser
             .parse_line(r#"{"type":"tool_use","tool_name":"list_files","tool_id":"tool-1","parameters":{"dir_path":"/x/docs"}}"#)
             .tool_start
             .expect("tool_start");
         assert_eq!(start.tool_call_id, "tool-1");
         assert_eq!(start.name, "list_files");
-        // Real tool_result → ToolEnd(ok).
-        assert!(parser
+        assert_eq!(start.input.as_deref(), Some(r#"{"dir_path":"/x/docs"}"#));
+        // Real tool_result → ToolEnd(ok), output lifted.
+        let end = parser
             .parse_line(r#"{"type":"tool_result","tool_id":"tool-1","status":"success","output":"Listed 11 item(s)."}"#)
             .tool_end
-            .expect("tool_end")
-            .ok);
+            .expect("tool_end");
+        assert!(end.ok);
+        assert_eq!(end.output.as_deref(), Some("Listed 11 item(s)."));
         // attempt_completion → the answer text.
         let answer = parser.parse_line(
             r#"{"type":"tool_use","tool_id":"tool-2","tool_name":"attempt_completion","parameters":{"result":"The docs directory contains 10 files."}}"#,
