@@ -202,7 +202,18 @@ fn probe_codex_signed_in() -> bool {
 /// turn-cap flag, so `tuning.max_turns` is intentionally ignored.
 /// Options precede the positional prompt, as `codex exec` expects.
 fn build_codex_args(prompt: String, mode: RunMode, tuning: &RunTuning) -> Vec<String> {
-    let mut args = vec!["exec".to_owned(), "--json".to_owned()];
+    // `--skip-git-repo-check`: `codex exec` otherwise refuses to run unless
+    // the cwd is a git repo ("Not inside a trusted directory and
+    // --skip-git-repo-check was not specified.", exit 1). A harness runs in
+    // whatever working directory the consumer hands it — often not a git repo
+    // (notes, drafts, a fresh folder) — so that interactive guardrail is
+    // wrong here. This skips only the is-this-a-repo gate; the execution
+    // sandbox (mode → `--full-auto`) is unaffected.
+    let mut args = vec![
+        "exec".to_owned(),
+        "--json".to_owned(),
+        "--skip-git-repo-check".to_owned(),
+    ];
     if let Some(model) = tuning.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         args.push("--model".to_owned());
         args.push(model.to_owned());
@@ -590,6 +601,10 @@ mod tests {
         let args = build_codex_args("hi".to_owned(), RunMode::Ask, &RunTuning::default());
         assert_eq!(args[0], "exec");
         assert!(args.contains(&"--json".to_owned()));
+        // Always present: a harness's cwd is often not a git repo, and
+        // without this `codex exec` exits 1 ("Not inside a trusted
+        // directory …"). Independent of run mode.
+        assert!(args.contains(&"--skip-git-repo-check".to_owned()));
         assert!(!args.iter().any(|a| a == "--model"));
         assert!(!args.iter().any(|a| a == "-c"));
         assert!(!args.iter().any(|a| a == "--full-auto"));
