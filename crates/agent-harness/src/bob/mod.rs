@@ -16,8 +16,8 @@ use bob_rs::{
     KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE,
 };
 use crate::{
-    normalize_process_event, CredentialSpec, Harness, HarnessCapabilities, HarnessInfo,
-    HarnessReadiness, InstallCallback, RunCallback, RunHandle, RunMode, RunRequest,
+    normalize_process_event, CredentialSpec, Harness, HarnessCapabilities, HarnessError,
+    HarnessInfo, HarnessReadiness, InstallCallback, RunCallback, RunHandle, RunMode, RunRequest,
 };
 
 pub mod parser;
@@ -77,14 +77,15 @@ impl Harness for BobHarness {
         }
     }
 
-    fn install(&self, on_event: InstallCallback) -> Result<(), String> {
+    fn install(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
         // The closure captures only the `Arc` (Clone + Send + Sync +
         // 'static), so it satisfies `install_bob`'s `F: FnMut + Send
-        // + Sync + Clone + 'static` bound.
-        install_bob(move |event| (*on_event)(event))
+        // + Sync + Clone + 'static` bound. bob-rs reports failures as a
+        // String; lift it into the typed install error.
+        install_bob(move |event| (*on_event)(event)).map_err(HarnessError::Install)
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, String> {
+    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         let opts = RunBobOptions {
             prompt: request.prompt,
             chat_mode: match request.mode {
@@ -117,7 +118,8 @@ impl Harness for BobHarness {
             for normalized in normalize_process_event(event, |line| parser.parse_line(line)) {
                 (*on_event)(normalized);
             }
-        })?;
+        })
+        .map_err(HarnessError::Spawn)?;
         Ok(Box::new(handle))
     }
 

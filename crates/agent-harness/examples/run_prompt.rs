@@ -30,7 +30,8 @@ fn main() -> Result<(), String> {
             tuning: RunTuning::default(), // optional: model / effort / max_turns
         },
         on_event,
-    )?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
+    )
+    .map_err(|e| e.to_string())?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
 
     // ONE normalized event stream, regardless of the backing CLI:
     for ev in rx {

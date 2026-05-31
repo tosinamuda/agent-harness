@@ -23,11 +23,14 @@ fn main() -> Result<(), String> {
     });
 
     let r = claude.readiness();
+    // `HarnessError` is the typed error; this example just stringifies it at
+    // the boundary (its `main` returns `Result<_, String>`) — the same pattern
+    // a Tauri command uses.
     if !r.installed {
-        claude.install(Arc::clone(&log))?; // npm i -g @anthropic-ai/claude-code
+        claude.install(Arc::clone(&log)).map_err(|e| e.to_string())?; // npm i -g @anthropic-ai/claude-code
     }
     if !r.auth_configured {
-        claude.login(log)?; // `claude auth login` — opens the browser
+        claude.login(log).map_err(|e| e.to_string())?; // `claude auth login` — opens the browser
     }
 
     println!("ready: {}", claude.readiness().ready);

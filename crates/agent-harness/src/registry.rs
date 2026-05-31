@@ -195,13 +195,19 @@ mod tests {
                 details: serde_json::Value::Null,
             }
         }
-        fn install(&self, _on_event: InstallCallback) -> Result<(), String> {
+        fn install(&self, _on_event: InstallCallback) -> Result<(), crate::HarnessError> {
             Ok(())
         }
-        fn run(&self, _req: RunRequest, _on_event: RunCallback) -> Result<RunHandle, String> {
+        fn run(
+            &self,
+            _req: RunRequest,
+            _on_event: RunCallback,
+        ) -> Result<RunHandle, crate::HarnessError> {
             // A real API-backed harness would call its HTTP endpoint here and
             // emit RunEvents through `on_event`; the dummy never runs.
-            Err("acme: run not implemented in test".to_owned())
+            Err(crate::HarnessError::Other(
+                "acme: run not implemented in test".to_owned(),
+            ))
         }
         fn credential(&self) -> CredentialSpec {
             CredentialSpec {

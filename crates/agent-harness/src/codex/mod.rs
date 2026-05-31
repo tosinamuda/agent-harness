@@ -21,8 +21,9 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::{
-    spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessInfo, HarnessReadiness,
-    InstallCallback, InstallEvent, RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
+    spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo,
+    HarnessReadiness, InstallCallback, InstallEvent, RunCallback, RunHandle, RunMode, RunRequest,
+    RunTuning,
 };
 
 mod parser;
@@ -102,7 +103,7 @@ impl Harness for CodexHarness {
         }
     }
 
-    fn install(&self, on_event: InstallCallback) -> Result<(), String> {
+    fn install(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
         (*on_event)(InstallEvent::Step {
             text: "Installing Codex via npm…".to_owned(),
         });
@@ -110,7 +111,7 @@ impl Harness for CodexHarness {
             .args(["install", "-g", "@openai/codex"])
             .env("PATH", crate::augmented_node_path())
             .output()
-            .map_err(|e| format!("failed to run npm: {e}"))?;
+            .map_err(|e| HarnessError::Install(format!("failed to run npm: {e}")))?;
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             (*on_event)(InstallEvent::Stdout {
                 text: line.to_owned(),
@@ -128,7 +129,7 @@ impl Harness for CodexHarness {
         Ok(())
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, String> {
+    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         let RunRequest { run_id, prompt, cwd, mode, tuning } = request;
         let args = build_codex_args(prompt, mode, &tuning);
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -160,7 +161,8 @@ impl Harness for CodexHarness {
                     (*on_event)(normalized);
                 }
             },
-        )?;
+        )
+        .map_err(HarnessError::Spawn)?;
         Ok(Box::new(handle))
     }
 
@@ -173,7 +175,7 @@ impl Harness for CodexHarness {
         }
     }
 
-    fn login(&self, on_event: InstallCallback) -> Result<(), String> {
+    fn login(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
         // `codex login` runs the CLI's OAuth flow (opens the browser).
         crate::run_login_command("codex", &["login"], on_event)
     }

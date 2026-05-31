@@ -23,8 +23,8 @@ use std::sync::{mpsc::sync_channel, Arc, Mutex};
 
 use harness::{
     run_events_from_parsed, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessInfo, HarnessReadiness, InstallCallback, ParsedLine, ProcessEvent, RunCallback,
-    RunEvent, RunHandle, RunMode, RunRequest, RunTuning, Registry, SessionInfo,
+    HarnessError, HarnessInfo, HarnessReadiness, InstallCallback, ParsedLine, ProcessEvent,
+    RunCallback, RunEvent, RunHandle, RunMode, RunRequest, RunTuning, Registry, SessionInfo,
 };
 use serde_json::Value;
 
@@ -66,7 +66,7 @@ impl Harness for EchoHarness {
         }
     }
 
-    fn install(&self, _on_event: InstallCallback) -> Result<(), String> {
+    fn install(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
         Ok(()) // nothing to install
     }
 
@@ -79,7 +79,7 @@ impl Harness for EchoHarness {
         }
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, String> {
+    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         // A real harness spawns its CLI here. We spawn `printf` to emit two
         // JSON lines: an init (→ Session) and the answer (→ Text).
         let answer = format!(r#"{{"text":"echo: {}"}}"#, request.prompt.replace('"', "'"));
@@ -108,7 +108,8 @@ impl Harness for EchoHarness {
                     (*on_event)(ev);
                 }
             },
-        )?;
+        )
+        .map_err(HarnessError::Spawn)?;
         Ok(Box::new(handle))
     }
 }
@@ -187,7 +188,8 @@ fn main() -> Result<(), String> {
             tuning: RunTuning::default(),
         },
         on_event,
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
 
     // One normalized stream — same as for any built-in harness.
     for ev in rx {
