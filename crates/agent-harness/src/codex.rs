@@ -247,21 +247,38 @@ fn build_codex_args(prompt: String, mode: RunMode, tuning: &RunTuning) -> Vec<St
 /// a tool we surface as a card. Grounded in the `codex exec --json`
 /// item types (`command_execution` carries the literal `command`;
 /// `file_change` / `web_search` / `mcp_tool_call` get a fixed label).
-fn codex_tool_label(item: &Map<String, Value>) -> Option<String> {
+/// A stable tool *identifier* for a codex item — the card's `name`, which the
+/// consumer humanizes (see Compose's `toolLabels`). Returning an identifier
+/// here rather than a display phrase keeps codex consistent with the other
+/// adapters (bob's `read_file`, …) and keeps the raw command — which lives in
+/// `input` — out of the `name`, so a live status never echoes a shell command.
+/// `None` for non-tool items.
+fn codex_tool_kind(item: &Map<String, Value>) -> Option<&'static str> {
     match item.get("type").and_then(Value::as_str)? {
-        "command_execution" => {
-            let command = item.get("command").and_then(Value::as_str).unwrap_or("");
-            Some(if command.is_empty() {
-                "Running a command".to_owned()
-            } else {
-                format!("Running: {}", truncate(command, 80))
-            })
-        }
-        "file_change" => Some("Editing files".to_owned()),
-        "web_search" => Some("Searching the web".to_owned()),
-        "mcp_tool_call" => Some("Tool · MCP".to_owned()),
+        "command_execution" => Some("command_execution"),
+        "file_change" => Some("file_change"),
+        "web_search" => Some("web_search"),
+        "mcp_tool_call" => Some("mcp_tool_call"),
         _ => None,
     }
+}
+
+/// A human-readable fallback label for a codex tool item, used only when it
+/// carries no `id` to key a card (rare — codex 0.125.0 always sends one). The
+/// normal path emits [`codex_tool_kind`] as the `name` and lets the consumer
+/// phrase it; this stays command-free so even the fallback can't leak a shell
+/// command into the status line.
+fn codex_tool_label(item: &Map<String, Value>) -> Option<String> {
+    Some(
+        match item.get("type").and_then(Value::as_str)? {
+            "command_execution" => "Running a command",
+            "file_change" => "Editing files",
+            "web_search" => "Searching the web",
+            "mcp_tool_call" => "Running a tool",
+            _ => return None,
+        }
+        .to_owned(),
+    )
 }
 
 /// The tool call's input, lifted inline. Only `command_execution`
@@ -487,14 +504,14 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
             // that's what makes a card appear. The frontend dedups a
             // repeated start by id, so a future codex that *does* send
             // `item.started` still renders correctly.
-            if let Some(label) = codex_tool_label(item) {
+            if let Some(kind) = codex_tool_kind(item) {
                 return match item.get("id").and_then(Value::as_str) {
                     Some(id) => {
                         let id = id.to_owned();
                         ParsedLine {
                             tool_start: Some(ToolCallStart {
                                 tool_call_id: id.clone(),
-                                name: label,
+                                name: kind.to_owned(),
                                 input: codex_tool_input(item),
                             }),
                             tool_end: Some(ToolCallEnd {
@@ -506,7 +523,7 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
                         }
                     }
                     None => ParsedLine {
-                        activity: Some(label),
+                        activity: codex_tool_label(item),
                         ..ParsedLine::default()
                     },
                 };
@@ -521,18 +538,18 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
             // matching `item.completed` flips it to done/error. If the
             // item has no `id` to key the card, degrade to a plain
             // activity line rather than drop it.
-            if let Some(label) = codex_tool_label(item) {
+            if let Some(kind) = codex_tool_kind(item) {
                 return match item.get("id").and_then(Value::as_str) {
                     Some(id) => ParsedLine {
                         tool_start: Some(ToolCallStart {
                             tool_call_id: id.to_owned(),
-                            name: label,
+                            name: kind.to_owned(),
                             input: codex_tool_input(item),
                         }),
                         ..ParsedLine::default()
                     },
                     None => ParsedLine {
-                        activity: Some(label),
+                        activity: codex_tool_label(item),
                         ..ParsedLine::default()
                     },
                 };
@@ -638,8 +655,10 @@ mod tests {
         let end = parsed.tool_end.expect("tool_end");
         assert_eq!(start.tool_call_id, "item_2");
         assert_eq!(end.tool_call_id, "item_2");
-        assert_eq!(start.name, "Running: bash -lc 'echo hi'");
-        // The command is lifted as input; aggregated_output as output.
+        // `name` is the tool *identifier* (the UI humanizes it); the command
+        // rides in `input`, never in the name — so it can't leak into a
+        // status line.
+        assert_eq!(start.name, "command_execution");
         assert_eq!(start.input.as_deref(), Some("bash -lc 'echo hi'"));
         assert_eq!(end.output.as_deref(), Some("hi\n"));
         assert!(end.ok, "exit_code 0 → ok");
@@ -662,7 +681,7 @@ mod tests {
         })
         .to_string();
         let parsed = parse_codex_line(&line);
-        assert_eq!(parsed.tool_start.expect("start").name, "Searching the web");
+        assert_eq!(parsed.tool_start.expect("start").name, "web_search");
         assert!(parsed.tool_end.expect("end").ok, "no exit_code, status completed → ok");
     }
 
@@ -675,7 +694,7 @@ mod tests {
         .to_string();
         let parsed = parse_codex_line(&line);
         let start = parsed.tool_start.expect("start");
-        assert_eq!(start.name, "Running: bash -lc ls");
+        assert_eq!(start.name, "command_execution");
         assert_eq!(start.input.as_deref(), Some("bash -lc ls")); // input known at start
         assert!(parsed.tool_end.is_none(), "started → running (no end yet)");
         assert!(parsed.activity.is_none());
@@ -691,7 +710,9 @@ mod tests {
         })
         .to_string();
         let parsed = parse_codex_line(&line);
-        assert_eq!(parsed.activity.as_deref(), Some("Running: ls -la"));
+        // No id to key a card → a command-free human fallback (never the
+        // raw command).
+        assert_eq!(parsed.activity.as_deref(), Some("Running a command"));
         assert!(parsed.tool_start.is_none() && parsed.tool_end.is_none());
     }
 
