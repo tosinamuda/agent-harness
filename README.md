@@ -63,9 +63,9 @@ Give it a prompt and stream the answer — same code whichever CLI runs undernea
 
 ```rust
 use std::sync::{mpsc::sync_channel, Arc};
-use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Claude, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), HarnessError> {
     // Pick a harness. `Claude` drives the `claude` CLI (must be installed +
     // signed in). Swap for `harness::Bob::new()` or `harness::Codex::new()`.
     let claude = Claude::new();

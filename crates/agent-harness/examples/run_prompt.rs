@@ -6,9 +6,9 @@
 
 use std::sync::{mpsc::sync_channel, Arc};
 
-use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Claude, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), HarnessError> {
     // Pick a harness. `Claude` drives the `claude` CLI (must be installed +
     // signed in). Swap for `harness::Bob::new()` or `harness::Codex::new()`.
     let claude = Claude::new();
@@ -30,8 +30,7 @@ fn main() -> Result<(), String> {
             tuning: RunTuning::default(), // optional: model / effort / max_turns
         },
         on_event,
-    )
-    .map_err(|e| e.to_string())?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
+    )?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
 
     // ONE normalized event stream, regardless of the backing CLI:
     for ev in rx {

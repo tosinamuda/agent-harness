@@ -10,9 +10,9 @@
 
 use std::sync::Arc;
 
-use harness::{Claude, Harness, InstallEvent};
+use harness::{Claude, Harness, HarnessError, InstallEvent};
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), HarnessError> {
     let claude = Claude::new();
 
     // A logger for the install/login progress stream.
@@ -23,14 +23,12 @@ fn main() -> Result<(), String> {
     });
 
     let r = claude.readiness();
-    // `HarnessError` is the typed error; this example just stringifies it at
-    // the boundary (its `main` returns `Result<_, String>`) — the same pattern
-    // a Tauri command uses.
+    // Fallible calls return the typed `HarnessError` (`?` propagates it).
     if !r.installed {
-        claude.install(Arc::clone(&log)).map_err(|e| e.to_string())?; // npm i -g @anthropic-ai/claude-code
+        claude.install(Arc::clone(&log))?; // npm i -g @anthropic-ai/claude-code
     }
     if !r.auth_configured {
-        claude.login(log).map_err(|e| e.to_string())?; // `claude auth login` — opens the browser
+        claude.login(log)?; // `claude auth login` — opens the browser
     }
 
     println!("ready: {}", claude.readiness().ready);
