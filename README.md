@@ -69,9 +69,9 @@ Give it a prompt and stream the answer — same code whichever CLI runs undernea
 
 ```rust
 use std::sync::{mpsc::sync_channel, Arc};
-use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Claude, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), HarnessError> {
     // Pick a harness. `Claude` drives the `claude` CLI (must be installed +
     // signed in). Swap for `harness::Bob::new()` or `harness::Codex::new()`.
     let claude = Claude::new();
@@ -107,6 +107,11 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 ```
+
+`install` / `run` / `login` / `cancel` return `Result<_, HarnessError>` — a
+typed error you can `match` on (`Spawn` / `Install` / `Login` / `Cancel` /
+`Other`) to react to the *kind* of failure, or just stringify at your boundary
+(`.map_err(|e| e.to_string())`, e.g. inside a Tauri command).
 
 Prefer to pick a harness by string id (e.g. from a config field)? Use the registry:
 
@@ -152,7 +157,7 @@ struct ClaudeWithDefaults { inner: harness::Claude }
 
 impl Harness for ClaudeWithDefaults {
     fn info(&self) -> HarnessInfo { /* tweak the model list, etc. */ }
-    fn run(&self, req: RunRequest, cb: RunCallback) -> Result<RunHandle, String> {
+    fn run(&self, req: RunRequest, cb: RunCallback) -> Result<RunHandle, HarnessError> {
         self.inner.run(req, cb)            // reuse Claude's spawn + parser
     }
     // readiness / install / credential / login → forward to self.inner
