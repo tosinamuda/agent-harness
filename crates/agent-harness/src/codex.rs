@@ -21,13 +21,15 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
 
+use crate::events::run_events_from_parsed;
 use crate::{
-    normalize_process_event, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessInfo, HarnessReadiness, InstallCallback, InstallEvent, ParsedLine, RunCallback,
-    RunHandle, RunMode, RunRequest, RunTuning, SessionInfo, ToolCallEnd, ToolCallStart, UsageInfo,
+    spawn_streaming, CredentialSpec, Harness, HarnessCapabilities, HarnessInfo, HarnessReadiness,
+    InstallCallback, InstallEvent, ParsedLine, ProcessEvent, RunCallback, RunEvent, RunHandle,
+    RunMode, RunRequest, RunTuning, SessionInfo, ToolCallEnd, ToolCallStart, UsageInfo,
 };
 
 /// Registry id for the Codex harness.
@@ -133,6 +135,14 @@ impl Harness for CodexHarness {
         // No env injected — Codex uses its own auth. PATH augmentation
         // in spawn_streaming ensures `node` is found for a
         // Finder-launched .app.
+        //
+        // Codex needs a *stateful* parser (one per run): it emits several
+        // complete `agent_message` items per turn — short preambles before
+        // tool calls and a final answer — that must not be concatenated into
+        // the answer, and its stderr is tracing noise to drop. The reader
+        // thread drives the parser sequentially; the `Mutex` just satisfies
+        // the `Fn + Send + Sync` callback bound (same shape as bob's).
+        let parser = Arc::new(Mutex::new(CodexStreamParser::new()));
         let handle = spawn_streaming(
             PathBuf::from("codex"),
             args,
@@ -140,7 +150,8 @@ impl Harness for CodexHarness {
             cwd,
             run_id,
             move |event| {
-                for normalized in normalize_process_event(event, parse_codex_line) {
+                let mut parser = parser.lock().expect("codex stream parser mutex");
+                for normalized in parser.on_process_event(event) {
                     (*on_event)(normalized);
                 }
             },
@@ -292,6 +303,143 @@ fn codex_tool_ok(item: &Map<String, Value>) -> bool {
     !matches!(
         item.get("status").and_then(Value::as_str),
         Some("failed") | Some("error")
+    )
+}
+
+/// Stateful per-run wrapper over [`parse_codex_line`] that resolves codex's
+/// preamble-vs-answer ambiguity and drops its stderr noise. One per run.
+///
+/// Codex emits several *complete* `agent_message` items in a turn: short
+/// preambles before tool calls ("I'll read the file first") and a final
+/// answer. Nothing on the item distinguishes them — the only signal is
+/// position: the last `agent_message` before `turn.completed` is the answer;
+/// every earlier one is a preamble. So we hold the latest `agent_message`
+/// and classify it by what follows — another item means it was a preamble
+/// (→ [`RunEvent::Activity`], transient narration), `turn.completed` (or
+/// stream end) means it was the answer (→ [`RunEvent::Text`]). Without this
+/// the preambles concatenate onto the answer in the bubble.
+///
+/// It also drops codex's stderr: in `--json` mode codex writes only tracing
+/// logs there ("Reading additional input…", internal `ERROR codex_core::…`
+/// lines) and reports real failures as stdout `error` items — so stderr is
+/// pure noise, not status.
+#[derive(Debug, Default)]
+pub struct CodexStreamParser {
+    /// The most recent `agent_message` text, not yet known to be a preamble
+    /// (→ Activity) or the final answer (→ Text).
+    pending_message: Option<String>,
+}
+
+impl CodexStreamParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Normalize one raw process event, applying the agent_message state
+    /// machine to stdout and dropping stderr noise.
+    pub fn on_process_event(&mut self, event: ProcessEvent) -> Vec<RunEvent> {
+        match event {
+            // codex's stderr is tracing noise in `--json` mode; real errors
+            // arrive as stdout `error` items. Don't surface it as status.
+            ProcessEvent::Stderr { .. } => Vec::new(),
+            ProcessEvent::Started { run_id } => vec![RunEvent::Started { run_id }],
+            ProcessEvent::Error { run_id, message } => {
+                // Flush a held message as the answer before the terminal error.
+                let mut out = self.take_pending_as_answer(&run_id);
+                out.push(RunEvent::Error { run_id, message });
+                out
+            }
+            ProcessEvent::Exited {
+                run_id,
+                exit_code,
+                cancelled,
+            } => {
+                // Defensive: a turn normally ends with `turn.completed` (which
+                // flushes the answer); if the stream ended without it, don't
+                // lose a held final message.
+                let mut out = self.take_pending_as_answer(&run_id);
+                out.push(RunEvent::Exited {
+                    run_id,
+                    exit_code,
+                    cancelled,
+                });
+                out
+            }
+            ProcessEvent::Stdout { run_id, line } => self.on_stdout(&run_id, &line),
+        }
+    }
+
+    fn on_stdout(&mut self, run_id: &str, line: &str) -> Vec<RunEvent> {
+        let value = serde_json::from_str::<Value>(line.trim()).ok();
+        let typ = value
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|o| o.get("type"))
+            .and_then(Value::as_str);
+
+        // A new assistant message arrived: whatever we held is now known to
+        // be a preamble (it was superseded). Hold the new one.
+        if let Some(text) = value.as_ref().and_then(codex_agent_message_text) {
+            let out = self.take_pending_as_preamble(run_id);
+            if !text.is_empty() {
+                self.pending_message = Some(text);
+            }
+            return out;
+        }
+
+        // Any other line: a held message is a preamble — unless the turn just
+        // ended, when it's the answer.
+        let mut out = if typ == Some("turn.completed") {
+            self.take_pending_as_answer(run_id)
+        } else {
+            self.take_pending_as_preamble(run_id)
+        };
+        // Non-`agent_message` lines still decode normally (tool cards,
+        // session, usage, error).
+        out.extend(run_events_from_parsed(run_id, parse_codex_line(line)));
+        out
+    }
+
+    /// Emit a held message as transient narration (it was a preamble).
+    fn take_pending_as_preamble(&mut self, run_id: &str) -> Vec<RunEvent> {
+        match self.pending_message.take() {
+            Some(text) if !text.is_empty() => vec![RunEvent::Activity {
+                run_id: run_id.to_owned(),
+                message: text,
+            }],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Emit a held message as the answer (the final assistant message).
+    fn take_pending_as_answer(&mut self, run_id: &str) -> Vec<RunEvent> {
+        match self.pending_message.take() {
+            Some(text) if !text.is_empty() => vec![RunEvent::Text {
+                run_id: run_id.to_owned(),
+                delta: text,
+            }],
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// The text of an `agent_message` `item.completed` line, else `None`. Returns
+/// `Some("")` for an empty/absent `text` so the caller still treats the line
+/// as a (superseding) message.
+fn codex_agent_message_text(value: &Value) -> Option<String> {
+    let obj = value.as_object()?;
+    if obj.get("type").and_then(Value::as_str) != Some("item.completed") {
+        return None;
+    }
+    let item = obj.get("item").and_then(Value::as_object)?;
+    if item.get("type").and_then(Value::as_str) != Some("agent_message") {
+        return None;
+    }
+    Some(
+        item.get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
     )
 }
 
@@ -627,5 +775,127 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--max-turns"));
         // Options precede the prompt; the prompt stays last.
         assert_eq!(args.last().map(String::as_str), Some("hi"));
+    }
+
+    // --- CodexStreamParser: preamble-vs-answer + stderr drop ----------------
+
+    fn stdout(p: &mut CodexStreamParser, line: &str) -> Vec<RunEvent> {
+        p.on_process_event(ProcessEvent::Stdout {
+            run_id: "r".to_owned(),
+            line: line.to_owned(),
+        })
+    }
+
+    #[test]
+    fn codex_preambles_are_narration_and_only_final_message_is_the_answer() {
+        // The grounded multi-message turn (codex-cli 0.125.0): two preambles
+        // before tool calls, then the final answer — nothing on the items
+        // distinguishes them, only position does.
+        let mut p = CodexStreamParser::new();
+        let mut events = Vec::new();
+        for line in [
+            r#"{"type":"thread.started","thread_id":"t"}"#,
+            r#"{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"I’m going to read a.txt first."}}"#,
+            r#"{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"cat a.txt","aggregated_output":"alpha\n","exit_code":0,"status":"completed"}}"#,
+            r#"{"type":"item.completed","item":{"id":"m2","type":"agent_message","text":"I’m going to read b.txt next."}}"#,
+            r#"{"type":"item.completed","item":{"id":"c2","type":"command_execution","command":"cat b.txt","aggregated_output":"one\n","exit_code":0,"status":"completed"}}"#,
+            r#"{"type":"item.completed","item":{"id":"m3","type":"agent_message","text":"a.txt has more lines."}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}"#,
+        ] {
+            events.extend(stdout(&mut p, line));
+        }
+
+        // Exactly one answer (Text) — the FINAL message; preambles are not in it.
+        let texts: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Text { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["a.txt has more lines."]);
+
+        // The two preambles surface as transient Activity (narration), in order.
+        let activity: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Activity { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            activity,
+            vec![
+                "I’m going to read a.txt first.",
+                "I’m going to read b.txt next."
+            ]
+        );
+
+        // Tool cards, session, and usage still flow through unchanged.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, RunEvent::ToolStart { .. }))
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Session { .. })));
+        assert!(events.iter().any(|e| matches!(e, RunEvent::Usage { .. })));
+    }
+
+    #[test]
+    fn codex_single_message_turn_is_the_answer() {
+        // No preamble: one agent_message → the answer, no spurious narration.
+        let mut p = CodexStreamParser::new();
+        let mut events = Vec::new();
+        events.extend(stdout(
+            &mut p,
+            r#"{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"Done."}}"#,
+        ));
+        events.extend(stdout(
+            &mut p,
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ));
+        let texts: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Text { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["Done."]);
+        assert!(!events.iter().any(|e| matches!(e, RunEvent::Activity { .. })));
+    }
+
+    #[test]
+    fn codex_stderr_is_dropped_as_noise() {
+        let mut p = CodexStreamParser::new();
+        let out = p.on_process_event(ProcessEvent::Stderr {
+            run_id: "r".to_owned(),
+            line: "2026-05-31T05:20:28Z ERROR codex_core::memories::phase2::job: failed to claim job"
+                .to_owned(),
+        });
+        assert!(out.is_empty(), "codex stderr is tracing noise → dropped, got {out:?}");
+    }
+
+    #[test]
+    fn codex_held_answer_is_flushed_if_stream_ends_without_turn_completed() {
+        // Defensive: final message then the process exits with no
+        // `turn.completed` — the answer must not be lost.
+        let mut p = CodexStreamParser::new();
+        let _ = stdout(
+            &mut p,
+            r#"{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"Final."}}"#,
+        );
+        let out = p.on_process_event(ProcessEvent::Exited {
+            run_id: "r".to_owned(),
+            exit_code: Some(0),
+            cancelled: false,
+        });
+        assert!(
+            matches!(out.first(), Some(RunEvent::Text { delta, .. }) if delta == "Final."),
+            "held answer flushed as Text before Exited, got {out:?}"
+        );
+        assert!(matches!(out.last(), Some(RunEvent::Exited { .. })));
     }
 }

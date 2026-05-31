@@ -236,68 +236,77 @@ pub fn normalize_process_event(
                 vec![RunEvent::Activity { run_id, message }]
             }
         }
-        ProcessEvent::Stdout { run_id, line } => {
-            let parsed = parse_line(&line);
-            let mut out = Vec::new();
-            // Session leads (it's the run's init); usage trails (end-of-turn).
-            if let Some(session) = parsed.session {
-                out.push(RunEvent::Session {
-                    run_id: run_id.clone(),
-                    session_id: session.session_id,
-                    model: session.model,
-                });
-            }
-            if let Some(text) = parsed.text {
-                out.push(RunEvent::Text {
-                    run_id: run_id.clone(),
-                    delta: text,
-                });
-            }
-            if let Some(thinking) = parsed.thinking {
-                out.push(RunEvent::Thinking {
-                    run_id: run_id.clone(),
-                    delta: thinking,
-                });
-            }
-            if let Some(start) = parsed.tool_start {
-                out.push(RunEvent::ToolStart {
-                    run_id: run_id.clone(),
-                    tool_call_id: start.tool_call_id,
-                    name: start.name,
-                    input: start.input,
-                });
-            }
-            if let Some(end) = parsed.tool_end {
-                out.push(RunEvent::ToolEnd {
-                    run_id: run_id.clone(),
-                    tool_call_id: end.tool_call_id,
-                    ok: end.ok,
-                    output: end.output,
-                });
-            }
-            if !parsed.edits.is_empty() {
-                out.push(RunEvent::SuggestedEdits {
-                    run_id: run_id.clone(),
-                    edits: parsed.edits,
-                });
-            }
-            if let Some(usage) = parsed.usage {
-                out.push(RunEvent::Usage {
-                    run_id: run_id.clone(),
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    total_tokens: usage.total_tokens,
-                });
-            }
-            if let Some(activity) = parsed.activity {
-                out.push(RunEvent::Activity {
-                    run_id,
-                    message: activity,
-                });
-            }
-            out
-        }
+        ProcessEvent::Stdout { run_id, line } => run_events_from_parsed(&run_id, parse_line(&line)),
     }
+}
+
+/// Expand a decoded [`ParsedLine`] into its [`RunEvent`]s for `run_id`, in a
+/// stable order: session (the run's init) → text → thinking → tool
+/// start/end → edits → usage (end of turn) → activity.
+///
+/// Shared by [`normalize_process_event`] and by adapters that wrap the line
+/// parser in their own per-run state (e.g. codex's preamble-vs-answer state
+/// machine, which decides *where* a message goes but still relies on this
+/// for everything else) — so the `ParsedLine` → `RunEvent` mapping lives in
+/// exactly one place.
+pub(crate) fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent> {
+    let mut out = Vec::new();
+    if let Some(session) = parsed.session {
+        out.push(RunEvent::Session {
+            run_id: run_id.to_owned(),
+            session_id: session.session_id,
+            model: session.model,
+        });
+    }
+    if let Some(text) = parsed.text {
+        out.push(RunEvent::Text {
+            run_id: run_id.to_owned(),
+            delta: text,
+        });
+    }
+    if let Some(thinking) = parsed.thinking {
+        out.push(RunEvent::Thinking {
+            run_id: run_id.to_owned(),
+            delta: thinking,
+        });
+    }
+    if let Some(start) = parsed.tool_start {
+        out.push(RunEvent::ToolStart {
+            run_id: run_id.to_owned(),
+            tool_call_id: start.tool_call_id,
+            name: start.name,
+            input: start.input,
+        });
+    }
+    if let Some(end) = parsed.tool_end {
+        out.push(RunEvent::ToolEnd {
+            run_id: run_id.to_owned(),
+            tool_call_id: end.tool_call_id,
+            ok: end.ok,
+            output: end.output,
+        });
+    }
+    if !parsed.edits.is_empty() {
+        out.push(RunEvent::SuggestedEdits {
+            run_id: run_id.to_owned(),
+            edits: parsed.edits,
+        });
+    }
+    if let Some(usage) = parsed.usage {
+        out.push(RunEvent::Usage {
+            run_id: run_id.to_owned(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+        });
+    }
+    if let Some(activity) = parsed.activity {
+        out.push(RunEvent::Activity {
+            run_id: run_id.to_owned(),
+            message: activity,
+        });
+    }
+    out
 }
 
 /// Take the first `max_chars` characters (not bytes) of `s`. Bounds the
