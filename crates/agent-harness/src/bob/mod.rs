@@ -111,7 +111,9 @@ impl Harness for BobHarness {
         // satisfies the `Fn + Send + Sync` callback bound.
         let parser = Arc::new(Mutex::new(BobStreamParser::default()));
         let handle = spawn_bob(opts, request.run_id, move |event| {
-            let mut parser = parser.lock().expect("bob stream parser mutex");
+            // Recover a poisoned lock rather than panic on the reader thread —
+            // parsing is total, so the held parser is never mid-corruption.
+            let mut parser = parser.lock().unwrap_or_else(|p| p.into_inner());
             for normalized in normalize_process_event(event, |line| parser.parse_line(line)) {
                 (*on_event)(normalized);
             }
