@@ -312,15 +312,18 @@ pub fn run_login_command(
                     ok: exit_code == Some(0),
                 });
                 let (lock, cvar) = &*done_cb;
-                *lock.lock().unwrap() = true;
+                // Recover from a poisoned lock instead of panicking on a
+                // reader thread: the guarded value is a plain bool, never in a
+                // half-updated state worth bailing on.
+                *lock.lock().unwrap_or_else(|p| p.into_inner()) = true;
                 cvar.notify_all();
             }
         },
     )?;
     let (lock, cvar) = &*done;
-    let mut finished = lock.lock().unwrap();
+    let mut finished = lock.lock().unwrap_or_else(|p| p.into_inner());
     while !*finished {
-        finished = cvar.wait(finished).unwrap();
+        finished = cvar.wait(finished).unwrap_or_else(|p| p.into_inner());
     }
     Ok(())
 }

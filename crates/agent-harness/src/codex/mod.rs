@@ -152,7 +152,10 @@ impl Harness for CodexHarness {
             cwd,
             run_id,
             move |event| {
-                let mut parser = parser.lock().expect("codex stream parser mutex");
+                // Recover a poisoned lock rather than panic on a reader
+                // thread — parsing is total, so the parser is never
+                // mid-corruption.
+                let mut parser = parser.lock().unwrap_or_else(|p| p.into_inner());
                 for normalized in parser.on_process_event(event) {
                     (*on_event)(normalized);
                 }
