@@ -192,33 +192,47 @@ where
         pump_lines(stderr, stderr_run_id, false, stderr_cb);
     });
 
-    // Exit watcher — waits on the child, joins the reader threads, then
-    // emits the terminal Exited event with the cancellation flag.
+    // Exit watcher — emits the terminal Exited event with the cancellation
+    // flag. It must NOT hold the child lock across a blocking `wait()`:
+    // `cancel()` needs that same lock to signal the child, so a held lock
+    // would block cancel until the process exited on its own (defeating it).
+    // Instead poll `try_wait()`, locking only for each non-blocking check and
+    // releasing between polls so `cancel()` can acquire the lock mid-run.
     let exit_inner = Arc::clone(&inner);
     let mut exit_cb = callback;
     let exit_run_id = run_id;
     thread::spawn(move || {
-        // Hold the lock only long enough to call wait(). Drop before
-        // joining threads so cancel() can still acquire the lock.
-        let wait_result = {
-            let mut guard = exit_inner.child.lock().ok();
-            guard.as_mut().and_then(|g| g.as_mut().map(|c| c.wait()))
+        let wait_result = loop {
+            {
+                let mut guard = match exit_inner.child.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => return, // poisoned — nothing safe to do
+                };
+                match guard.as_mut() {
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(status)) => break Ok(status),
+                        Ok(None) => {}            // still running; poll again
+                        Err(err) => break Err(err),
+                    },
+                    None => return, // already reaped
+                }
+            } // lock released before sleeping, so cancel() can acquire it
+            thread::sleep(Duration::from_millis(50));
         };
         let _ = stdout_handle.join();
         let _ = stderr_handle.join();
         let cancelled = exit_inner.cancelled.load(Ordering::SeqCst);
 
         match wait_result {
-            Some(Ok(status)) => exit_cb(ProcessEvent::Exited {
+            Ok(status) => exit_cb(ProcessEvent::Exited {
                 run_id: exit_run_id.clone(),
                 exit_code: status.code(),
                 cancelled,
             }),
-            Some(Err(err)) => exit_cb(ProcessEvent::Error {
+            Err(err) => exit_cb(ProcessEvent::Error {
                 run_id: exit_run_id.clone(),
                 message: format!("wait failed: {err}"),
             }),
-            None => {}
         }
 
         // Drop the child handle so subsequent cancel() calls
@@ -335,5 +349,159 @@ mod tests {
         let combined = augment_path_for_node(Path::new("/Users/x/.nvm/versions/node/v22/bin/bob"));
         assert!(combined.starts_with("/Users/x/.nvm/versions/node/v22/bin:"));
         assert!(combined.contains("/opt/homebrew/bin"));
+    }
+}
+
+/// End-to-end lifecycle tests that spawn real processes. Unix-only: they use
+/// `printf` / `sh` / `sleep`, and the cancel path is signal-based here.
+#[cfg(all(test, unix))]
+mod lifecycle {
+    use super::*;
+    use std::sync::Condvar;
+    use std::time::Instant;
+
+    type Done = Arc<(Mutex<bool>, Condvar)>;
+
+    /// A thread-safe event collector that signals `done` on the terminal
+    /// event. Returns the (cloneable) callback + the shared collections.
+    fn collector() -> (
+        impl FnMut(ProcessEvent) + Send + Sync + Clone + 'static,
+        Arc<Mutex<Vec<ProcessEvent>>>,
+        Done,
+    ) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let done: Done = Arc::new((Mutex::new(false), Condvar::new()));
+        let cb = {
+            let events = Arc::clone(&events);
+            let done = Arc::clone(&done);
+            move |ev: ProcessEvent| {
+                let terminal =
+                    matches!(ev, ProcessEvent::Exited { .. } | ProcessEvent::Error { .. });
+                events.lock().unwrap().push(ev);
+                if terminal {
+                    let (lock, cvar) = &*done;
+                    *lock.lock().unwrap() = true;
+                    cvar.notify_all();
+                }
+            }
+        };
+        (cb, events, done)
+    }
+
+    /// Block until the terminal event fires, or panic after `secs`.
+    fn wait_done(done: &Done, secs: u64) {
+        let (lock, cvar) = &**done;
+        let mut finished = lock.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while !*finished {
+            let now = Instant::now();
+            assert!(now < deadline, "process did not finish within {secs}s");
+            let (guard, _) = cvar.wait_timeout(finished, deadline - now).unwrap();
+            finished = guard;
+        }
+    }
+
+    /// Spawn `program args`, block until it exits, return every event.
+    fn run(program: &str, args: &[&str]) -> Vec<ProcessEvent> {
+        let (cb, events, done) = collector();
+        let _handle = spawn_streaming(
+            PathBuf::from(program),
+            args.iter().map(|s| (*s).to_owned()).collect(),
+            Vec::new(),
+            PathBuf::from("."),
+            "t".to_owned(),
+            cb,
+        )
+        .expect("spawn");
+        wait_done(&done, 10);
+        let events = events.lock().unwrap();
+        events.clone()
+    }
+
+    #[test]
+    fn streams_stdout_lines_then_exits_zero() {
+        let events = run("printf", &["%s\n", "alpha", "beta"]);
+        // Started leads, Exited(0, not cancelled) closes.
+        assert!(matches!(events.first(), Some(ProcessEvent::Started { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(ProcessEvent::Exited { exit_code: Some(0), cancelled: false, .. })
+        ));
+        // Lines arrive in order, one event each.
+        let lines: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProcessEvent::Stdout { line, .. } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn nonzero_exit_code_is_reported() {
+        let events = run("sh", &["-c", "exit 3"]);
+        assert!(matches!(
+            events.last(),
+            Some(ProcessEvent::Exited { exit_code: Some(3), cancelled: false, .. })
+        ));
+    }
+
+    #[test]
+    fn stderr_is_streamed_and_not_misrouted_to_stdout() {
+        let events = run("sh", &["-c", "echo to-stderr 1>&2"]);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProcessEvent::Stderr { line, .. } if line == "to-stderr")));
+        assert!(!events.iter().any(|e| matches!(e, ProcessEvent::Stdout { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProcessEvent::Exited { exit_code: Some(0), .. })));
+    }
+
+    #[test]
+    fn cancel_promptly_terminates_the_run_and_flags_it() {
+        // A 10s sleeper we cancel ~immediately; a working engine must kill it
+        // far sooner than 10s. `exec` so the process *is* sleep (no orphan).
+        let (cb, events, done) = collector();
+        let handle = spawn_streaming(
+            PathBuf::from("sh"),
+            vec!["-c".to_owned(), "exec sleep 10".to_owned()],
+            Vec::new(),
+            PathBuf::from("."),
+            "t".to_owned(),
+            cb,
+        )
+        .expect("spawn");
+
+        // cancel() may block until the child is reaped, so fire it off-thread.
+        let canceller = handle.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            let _ = canceller.cancel();
+        });
+
+        // Correct cancellation terminates the 10s sleep within a few seconds.
+        wait_done(&done, 4);
+        assert!(handle.was_cancelled());
+        let events = events.lock().unwrap();
+        assert!(
+            matches!(events.last(), Some(ProcessEvent::Exited { cancelled: true, .. })),
+            "expected Exited(cancelled=true), got {:?}",
+            events.last()
+        );
+    }
+
+    #[test]
+    fn spawning_a_missing_binary_is_err() {
+        let result = spawn_streaming(
+            PathBuf::from("cli-stream-no-such-binary-zzz"),
+            Vec::new(),
+            Vec::new(),
+            PathBuf::from("."),
+            "t".to_owned(),
+            |_ev: ProcessEvent| {},
+        );
+        assert!(result.is_err(), "spawning a missing binary must Err");
     }
 }
