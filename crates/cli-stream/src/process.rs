@@ -313,7 +313,20 @@ fn compute_augmented_node_path() -> String {
     // The user's real PATH (nvm/pnpm/volta/asdf/Homebrew) via their login
     // shell; a hardcoded best-effort list if that's unavailable.
     parts.push(login_shell_path().unwrap_or_else(hardcoded_node_dirs));
-    parts.join(":")
+    keep_absolute_entries(&parts.join(":"))
+}
+
+/// Keep only **absolute** PATH entries, dropping relative or empty ones (`.`,
+/// `""`, a direnv-style `node_modules/.bin`). Security: we spawn with
+/// `current_dir` set to the user's workspace — where the agent itself writes
+/// files and synced/downloaded content lands — so a relative/empty PATH entry
+/// (which resolves against that cwd) could run a planted `node`/`claude`. An
+/// empty entry is the classic implicit-cwd vector. Absolute dirs only.
+fn keep_absolute_entries(path: &str) -> String {
+    path.split(':')
+        .filter(|entry| entry.starts_with('/'))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// Resolve PATH by asking the user's login + interactive shell — it sources
@@ -452,6 +465,20 @@ mod tests {
         // Sentinel present but PATH absent/empty → None.
         assert_eq!(parse_path_from_shell_output("__CLI_STREAM_PATH__\nFOO=bar"), None);
         assert_eq!(parse_path_from_shell_output("__CLI_STREAM_PATH__\nPATH=\nFOO=bar"), None);
+    }
+
+    #[test]
+    fn keep_absolute_entries_drops_relative_and_empty() {
+        // Relative (`node_modules/.bin`, `.`) and empty entries — which resolve
+        // against the spawn cwd (the user's workspace) — are dropped; absolute
+        // dirs survive in order.
+        assert_eq!(
+            keep_absolute_entries("/opt/homebrew/bin:node_modules/.bin:/usr/bin:.::/bin"),
+            "/opt/homebrew/bin:/usr/bin:/bin"
+        );
+        assert_eq!(keep_absolute_entries("/usr/bin"), "/usr/bin");
+        // All-relative → empty (caller still has the process PATH ahead of it).
+        assert_eq!(keep_absolute_entries(".:rel:"), "");
     }
 
     #[test]
