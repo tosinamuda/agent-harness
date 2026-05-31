@@ -364,15 +364,20 @@ fn login_shell_path() -> Option<String> {
         .spawn()
         .ok()?;
     // Read on a worker thread so the whole query can be bounded by a timeout —
-    // a misbehaving rc must not hang the app.
+    // a misbehaving rc must not hang the app. Read bytes + lossy-decode (rather
+    // than `read_to_string`) so non-UTF-8 in the env dump degrades to
+    // replacement chars instead of discarding the whole output.
     let mut stdout = child.stdout.take()?;
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = stdout.read_to_string(&mut buf);
-        let _ = tx.send(buf);
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
     });
-    let output = match rx.recv_timeout(Duration::from_secs(2)) {
+    // 4s: generous enough for a heavy rc (oh-my-zsh + plugins + nvm lazy-load)
+    // to finish, since this is paid at most once (cached); on timeout we kill
+    // the shell and fall back to the hardcoded list.
+    let output = match rx.recv_timeout(Duration::from_secs(4)) {
         Ok(buf) => buf,
         Err(_) => {
             let _ = child.kill();
