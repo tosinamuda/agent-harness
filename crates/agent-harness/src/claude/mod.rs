@@ -80,8 +80,13 @@ impl Harness for ClaudeHarness {
             };
         };
         // Installed — now distinguish signed-in from not, so the picker
-        // can offer "Sign in" instead of failing the first run.
-        let signed_in = probe_claude_signed_in();
+        // can offer "Sign in" instead of failing the first run. Either the
+        // CLI's own OAuth login OR an `ANTHROPIC_API_KEY` in the environment
+        // counts: the env key is how you run headless (a container / CI),
+        // where `claude auth login` can't open a browser. `claude auth status`
+        // only sees the OAuth state, so we OR in the env key ourselves.
+        let signed_in = probe_claude_signed_in()
+            || crate::harness::api_key_value_usable(std::env::var("ANTHROPIC_API_KEY").ok());
         HarnessReadiness {
             harness_id: CLAUDE_HARNESS_ID.to_owned(),
             ready: signed_in,
@@ -92,7 +97,7 @@ impl Harness for ClaudeHarness {
                 None
             } else {
                 Some(
-                    "Claude Code is installed but not signed in. Click Sign in to connect your Anthropic account."
+                    "Claude Code is installed but not signed in. Click Sign in to connect your Anthropic account, or set ANTHROPIC_API_KEY."
                         .to_owned(),
                 )
             },
