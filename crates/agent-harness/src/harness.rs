@@ -39,6 +39,35 @@ pub type RunCallback = Arc<dyn Fn(RunEvent) + Send + Sync>;
 /// Callback a harness invokes for each install event.
 pub type InstallCallback = Arc<dyn Fn(InstallEvent) + Send + Sync>;
 
+// --- Errors ---------------------------------------------------------
+
+/// Why a [`Harness`] operation failed. Returned by `install` / `run` /
+/// `login` / [`RunControl::cancel`] so a consumer can branch on the *kind* of
+/// failure — offer install vs sign-in vs surface the message — instead of
+/// string-matching. `#[non_exhaustive]` so adding a variant later (e.g. a
+/// typed spawn source) isn't a breaking change.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum HarnessError {
+    /// The harness's CLI couldn't be started — not installed, not on `PATH`,
+    /// or an OS-level spawn failure.
+    #[error("failed to start the agent: {0}")]
+    Spawn(String),
+    /// A one-time install step failed.
+    #[error("install failed: {0}")]
+    Install(String),
+    /// Interactive sign-in failed.
+    #[error("sign-in failed: {0}")]
+    Login(String),
+    /// Cancelling an in-flight run failed.
+    #[error("cancel failed: {0}")]
+    Cancel(String),
+    /// Any other adapter/runtime failure (e.g. a backend SDK error that
+    /// doesn't map onto the cases above).
+    #[error("{0}")]
+    Other(String),
+}
+
 // --- Run control (cancellation) -------------------------------------
 
 /// Object-safe handle to an in-flight run. A process-backed harness
@@ -47,7 +76,7 @@ pub type InstallCallback = Arc<dyn Fn(InstallEvent) + Send + Sync>;
 /// these two operations, so the concrete mechanism stays behind the trait.
 pub trait RunControl: Send + Sync {
     /// Stop the run. Best-effort; idempotent.
-    fn cancel(&self) -> Result<(), String>;
+    fn cancel(&self) -> Result<(), HarnessError>;
     /// Whether [`cancel`](RunControl::cancel) was called.
     fn was_cancelled(&self) -> bool;
 }
@@ -59,8 +88,8 @@ pub type RunHandle = Box<dyn RunControl>;
 // Both the trait and the handle live in this crate, so this impl is here
 // (orphan rule) rather than in any adapter crate.
 impl RunControl for ProcessHandle {
-    fn cancel(&self) -> Result<(), String> {
-        ProcessHandle::cancel(self)
+    fn cancel(&self) -> Result<(), HarnessError> {
+        ProcessHandle::cancel(self).map_err(HarnessError::Cancel)
     }
     fn was_cancelled(&self) -> bool {
         ProcessHandle::was_cancelled(self)
@@ -247,11 +276,11 @@ pub trait Harness: Send + Sync {
 
     /// Stream a one-time install. Harnesses that need no install
     /// (e.g. a hosted-API adapter) return `Ok(())` immediately.
-    fn install(&self, on_event: InstallCallback) -> Result<(), String>;
+    fn install(&self, on_event: InstallCallback) -> Result<(), HarnessError>;
 
     /// Start a run, streaming events through `on_event`. Returns a
     /// handle immediately; work continues on background threads.
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, String>;
+    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError>;
 
     /// The credential this harness needs.
     fn credential(&self) -> CredentialSpec;
@@ -262,8 +291,10 @@ pub trait Harness: Send + Sync {
     /// user's browser; this blocks until the login process exits, then
     /// `Done { ok }` reports success. Default: unsupported — harnesses
     /// that Compose authenticates itself (bob, via its API key) keep it.
-    fn login(&self, _on_event: InstallCallback) -> Result<(), String> {
-        Err("This harness does not support interactive sign-in.".to_owned())
+    fn login(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
+        Err(HarnessError::Login(
+            "This harness does not support interactive sign-in.".to_owned(),
+        ))
     }
 }
 
@@ -280,7 +311,7 @@ pub fn run_login_command(
     program: &str,
     args: &[&str],
     on_event: InstallCallback,
-) -> Result<(), String> {
+) -> Result<(), HarnessError> {
     (*on_event)(InstallEvent::Step {
         text: "Opening your browser to sign in…".to_owned(),
     });
@@ -316,7 +347,8 @@ pub fn run_login_command(
                 cvar.notify_all();
             }
         },
-    )?;
+    )
+    .map_err(HarnessError::Login)?;
     let (lock, cvar) = &*done;
     let mut finished = lock.lock().unwrap();
     while !*finished {

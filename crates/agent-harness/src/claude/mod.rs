@@ -20,8 +20,8 @@ use serde_json::Value;
 
 use crate::{
     normalize_process_event, spawn_streaming, CredentialSpec, Harness, HarnessCapabilities,
-    HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstallEvent, RunCallback,
-    RunHandle, RunMode, RunRequest, RunTuning,
+    HarnessError, HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, InstallEvent,
+    RunCallback, RunHandle, RunMode, RunRequest, RunTuning,
 };
 
 mod parser;
@@ -100,7 +100,7 @@ impl Harness for ClaudeHarness {
         }
     }
 
-    fn install(&self, on_event: InstallCallback) -> Result<(), String> {
+    fn install(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
         // npm global install. Blocking (matches the `install`
         // contract); we capture output and forward it as install
         // events. Streaming live progress is a future refinement.
@@ -111,7 +111,7 @@ impl Harness for ClaudeHarness {
             .args(["install", "-g", "@anthropic-ai/claude-code"])
             .env("PATH", crate::augmented_node_path())
             .output()
-            .map_err(|e| format!("failed to run npm: {e}"))?;
+            .map_err(|e| HarnessError::Install(format!("failed to run npm: {e}")))?;
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             (*on_event)(InstallEvent::Stdout {
                 text: line.to_owned(),
@@ -129,7 +129,7 @@ impl Harness for ClaudeHarness {
         Ok(())
     }
 
-    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, String> {
+    fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
         let RunRequest { run_id, prompt, cwd, mode, tuning } = request;
         let args = build_claude_args(prompt, mode, &tuning);
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -148,7 +148,8 @@ impl Harness for ClaudeHarness {
                     (*on_event)(normalized);
                 }
             },
-        )?;
+        )
+        .map_err(HarnessError::Spawn)?;
         Ok(Box::new(handle))
     }
 
@@ -163,7 +164,7 @@ impl Harness for ClaudeHarness {
         }
     }
 
-    fn login(&self, on_event: InstallCallback) -> Result<(), String> {
+    fn login(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
         // `claude auth login` runs the CLI's OAuth flow (opens the
         // browser); streamed + blocked-until-exit by the shared helper.
         crate::run_login_command("claude", &["auth", "login"], on_event)

@@ -31,9 +31,9 @@ pub use events::{
 };
 pub use raw::parse_raw_line;
 pub use harness::{
-    run_login_command, CredentialSpec, Harness, HarnessCapabilities, HarnessInfo, HarnessModel,
-    HarnessReadiness, InstallCallback, ReasoningEffort, RunCallback, RunControl, RunHandle, RunMode,
-    RunRequest, RunTuning,
+    run_login_command, CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo,
+    HarnessModel, HarnessReadiness, InstallCallback, ReasoningEffort, RunCallback, RunControl,
+    RunHandle, RunMode, RunRequest, RunTuning,
 };
 // The generic subprocess engine + the install/process event shapes live in
 // the `cli-stream` leaf; re-export them so adapters + consumers reach them

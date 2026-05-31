@@ -44,7 +44,8 @@ fn main() -> Result<(), String> {
             tuning,
         },
         on_event,
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
 
     let (mut session, mut tool_input, mut tool_output, mut usage) = (false, false, false, false);
     for ev in rx {
