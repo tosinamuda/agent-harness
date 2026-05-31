@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -277,38 +277,161 @@ where
 /// usually live in an nvm install. The user's existing PATH stays as a
 /// fallback after our prepended directory.
 fn augment_path_for_node(program: &Path) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(parent) = program.parent() {
-        let parent_str = parent.display().to_string();
-        if !parent_str.is_empty() {
-            parts.push(parent_str);
-        }
+    prepend_program_dir(program, &augmented_node_path())
+}
+
+/// Prepend the directory containing `program` (where `node` also lives in an
+/// nvm install) to `base_path`, so the resolved binary's own dir is searched
+/// first. Pure (no env / no spawn) so it's unit-tested directly.
+fn prepend_program_dir(program: &Path, base_path: &str) -> String {
+    match program
+        .parent()
+        .map(|p| p.display().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        Some(dir) => format!("{dir}:{base_path}"),
+        None => base_path.to_owned(),
     }
-    parts.push(augmented_node_path());
-    parts.join(":")
 }
 
 /// A PATH that resolves Node-based CLIs (bob, claude, codex) even from a
 /// process launched by Finder/Launchpad, which inherits only the minimal
-/// launchd PATH (`/usr/bin:/bin:/usr/sbin:/sbin`).
+/// launchd PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) rather than the user's
+/// shell PATH.
 ///
-/// Used both by the run path (which prepends the resolved binary's own
-/// directory on top of this) and — crucially — by readiness probes that
-/// locate `claude`/`codex` via a bare `Command::new(name)`. Without this,
-/// the packaged `.app` reports installed CLIs as "not installed" because
-/// their bin dir (nvm, ~/.local/bin, Homebrew) isn't on the launchd PATH.
-/// The caller's existing PATH stays first as a fallback; added
-/// directories never replace it.
+/// Strategy: keep the process's own PATH first (an explicit PATH still wins),
+/// then append the user's **real** PATH as resolved by their login shell —
+/// which sources their rc, so it knows where nvm / pnpm / volta / asdf / fnm /
+/// Homebrew put `node`, with no guessing. If the shell query is unavailable
+/// (no `$SHELL`, a timeout, a sandboxed app that can't spawn, …) we fall back
+/// to a hardcoded best-effort list, so we're never worse than before.
+///
+/// Used by the run path (which prepends the resolved binary's own dir on top
+/// of this) and by readiness probes that locate `claude`/`codex` via a bare
+/// `Command::new(name)`. Computed once and cached for the process — the
+/// (bounded) shell spawn happens at most once per launch, lazily on the first
+/// readiness/run/login, never at construction.
 pub fn augmented_node_path() -> String {
+    static CACHED: OnceLock<String> = OnceLock::new();
+    CACHED.get_or_init(compute_augmented_node_path).clone()
+}
+
+fn compute_augmented_node_path() -> String {
     let mut parts: Vec<String> = Vec::new();
+    // The process's own PATH first — anything explicitly set still wins.
     if let Ok(existing) = std::env::var("PATH") {
         if !existing.is_empty() {
             parts.push(existing);
         }
     }
-    // macOS defaults — covers Homebrew (Apple Silicon + Intel) and the
-    // system bins a launchd process might otherwise lack entirely.
-    parts.push("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_owned());
+    // The user's real PATH (nvm/pnpm/volta/asdf/Homebrew) via their login
+    // shell; a hardcoded best-effort list if that's unavailable.
+    parts.push(login_shell_path().unwrap_or_else(hardcoded_node_dirs));
+    keep_absolute_entries(&parts.join(":"))
+}
+
+/// Keep only **absolute** PATH entries, dropping relative or empty ones (`.`,
+/// `""`, a direnv-style `node_modules/.bin`). Security: we spawn with
+/// `current_dir` set to the user's workspace — where the agent itself writes
+/// files and synced/downloaded content lands — so a relative/empty PATH entry
+/// (which resolves against that cwd) could run a planted `node`/`claude`. An
+/// empty entry is the classic implicit-cwd vector. Absolute dirs only.
+fn keep_absolute_entries(path: &str) -> String {
+    path.split(':')
+        .filter(|entry| entry.starts_with('/'))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Resolve PATH by asking the user's login + interactive shell — it sources
+/// their rc, so it knows wherever any node manager (nvm / pnpm / volta / asdf /
+/// fnm / Homebrew) put `node`, without us guessing. Bounded by a timeout so a
+/// slow or interactive rc can't hang us; returns `None` (→ hardcoded fallback)
+/// on any failure: no `$SHELL`, spawn refused (e.g. a sandboxed app), timeout,
+/// or no PATH in the output. Reads PATH from `env` (OS colon format,
+/// shell-agnostic — works for fish too) rather than expanding `$PATH`.
+///
+/// This *executes the user's shell rc*, exactly as opening a terminal does —
+/// their own shell, on their own machine. It is not a privilege/auth step: no
+/// "login session" is created; `-l`/`-i` only select which startup files are
+/// sourced (login profiles + the interactive rc where nvm usually lives).
+/// Printed on its own line right before `env`, so the parser can skip any
+/// shell-init chatter / terminal escape sequences (e.g. iTerm2 shell
+/// integration's `]1337;…` OSC codes) the interactive shell emits before our
+/// command runs — which would otherwise prepend to the `PATH=` line.
+const PATH_SENTINEL: &str = "__CLI_STREAM_PATH__";
+
+#[cfg(unix)]
+fn login_shell_path() -> Option<String> {
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty())?;
+    // Print a sentinel line, then dump the environment. Reading PATH from `env`
+    // (not by expanding `$PATH`) keeps it OS colon format and shell-agnostic
+    // (fish stores PATH as a list); the sentinel lets the parser ignore
+    // anything the interactive shell prints at startup before `env` runs.
+    let script = format!("printf '\\n{PATH_SENTINEL}\\n'; env");
+    let mut child = Command::new(&shell)
+        .arg("-lic") // -l: login profiles, -i: interactive rc (nvm), -c: command
+        .arg(&script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // Read on a worker thread so the whole query can be bounded by a timeout —
+    // a misbehaving rc must not hang the app. Read bytes + lossy-decode (rather
+    // than `read_to_string`) so non-UTF-8 in the env dump degrades to
+    // replacement chars instead of discarding the whole output.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+    });
+    // 4s: generous enough for a heavy rc (oh-my-zsh + plugins + nvm lazy-load)
+    // to finish, since this is paid at most once (cached); on timeout we kill
+    // the shell and fall back to the hardcoded list.
+    let output = match rx.recv_timeout(Duration::from_secs(4)) {
+        Ok(buf) => buf,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let _ = child.wait();
+    parse_path_from_shell_output(&output)
+}
+
+#[cfg(not(unix))]
+fn login_shell_path() -> Option<String> {
+    None
+}
+
+/// Extract the `PATH=…` value from the shell's `printf <sentinel>; env` output.
+/// Everything up to (and including) the last sentinel is discarded — that's
+/// where shell-init chatter and terminal escape sequences live — then the
+/// `PATH=` line is read from the clean `env` dump that follows. `None` if the
+/// sentinel is missing (query misbehaved) or PATH is absent/empty.
+fn parse_path_from_shell_output(output: &str) -> Option<String> {
+    output
+        .rsplit_once(PATH_SENTINEL)?
+        .1
+        .lines()
+        .find_map(|line| line.strip_prefix("PATH="))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+}
+
+/// Hardcoded best-effort node locations — the fallback when the login-shell
+/// query is unavailable. Covers Homebrew (both arches), the system bins, the
+/// official-installer dir, and any nvm-managed node. Misses pnpm/volta/asdf —
+/// that's what the shell query is for — but never makes things worse than the
+/// bare launchd PATH.
+fn hardcoded_node_dirs() -> String {
+    let mut parts: Vec<String> =
+        vec!["/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_owned()];
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() {
             let home_path = Path::new(&home);
@@ -334,21 +457,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn augmented_node_path_includes_macos_defaults() {
-        // These must always be present so a launchd-spawned `.app` can
-        // resolve Homebrew-installed CLIs and the system bins — this is the
-        // fix for claude/codex being mis-reported as "not installed".
-        let path = augmented_node_path();
+    fn hardcoded_fallback_includes_macos_defaults() {
+        // The fallback (used when the login-shell query is unavailable) must
+        // still carry Homebrew + the system bins, so a launchd-spawned `.app`
+        // resolves CLIs even without a usable shell — the original
+        // "not installed" fix.
+        let path = hardcoded_node_dirs();
         assert!(path.contains("/opt/homebrew/bin"), "missing Apple-Silicon Homebrew bin");
         assert!(path.contains("/usr/local/bin"), "missing Intel Homebrew / system bin");
         assert!(path.contains("/usr/bin"), "missing system bin");
     }
 
     #[test]
-    fn augment_path_for_node_prepends_the_program_dir() {
-        let combined = augment_path_for_node(Path::new("/Users/x/.nvm/versions/node/v22/bin/bob"));
+    fn parse_path_from_shell_output_skips_chatter_before_the_sentinel() {
+        // Real-world shape: iTerm2 OSC escapes + a banner emitted at shell
+        // startup, BEFORE our sentinel + `env` dump. Only the post-sentinel
+        // PATH= line counts — note the pre-sentinel "PATH=/decoy" is ignored.
+        let output = "\u{1b}]1337;RemoteHost=x\u{7}welcome banner\nPATH=/decoy\n__CLI_STREAM_PATH__\nHOME=/Users/x\nPATH=/opt/homebrew/bin:/usr/bin\nLANG=en_US";
+        assert_eq!(
+            parse_path_from_shell_output(output).as_deref(),
+            Some("/opt/homebrew/bin:/usr/bin")
+        );
+        // No sentinel (query misbehaved) → None, so the caller falls back —
+        // even if a bare PATH= is present.
+        assert_eq!(parse_path_from_shell_output("PATH=/usr/bin"), None);
+        // Sentinel present but PATH absent/empty → None.
+        assert_eq!(parse_path_from_shell_output("__CLI_STREAM_PATH__\nFOO=bar"), None);
+        assert_eq!(parse_path_from_shell_output("__CLI_STREAM_PATH__\nPATH=\nFOO=bar"), None);
+    }
+
+    #[test]
+    fn keep_absolute_entries_drops_relative_and_empty() {
+        // Relative (`node_modules/.bin`, `.`) and empty entries — which resolve
+        // against the spawn cwd (the user's workspace) — are dropped; absolute
+        // dirs survive in order.
+        assert_eq!(
+            keep_absolute_entries("/opt/homebrew/bin:node_modules/.bin:/usr/bin:.::/bin"),
+            "/opt/homebrew/bin:/usr/bin:/bin"
+        );
+        assert_eq!(keep_absolute_entries("/usr/bin"), "/usr/bin");
+        // All-relative → empty (caller still has the process PATH ahead of it).
+        assert_eq!(keep_absolute_entries(".:rel:"), "");
+    }
+
+    #[test]
+    fn prepend_program_dir_puts_the_binary_dir_first() {
+        let combined = prepend_program_dir(
+            Path::new("/Users/x/.nvm/versions/node/v22/bin/bob"),
+            "/opt/homebrew/bin:/usr/bin",
+        );
         assert!(combined.starts_with("/Users/x/.nvm/versions/node/v22/bin:"));
         assert!(combined.contains("/opt/homebrew/bin"));
+        // A bare program name has no parent dir → base path unchanged.
+        assert_eq!(prepend_program_dir(Path::new("bob"), "/usr/bin"), "/usr/bin");
+    }
+
+    #[test]
+    fn augmented_node_path_is_nonempty_and_resolves_system_bin() {
+        // Exercises the cached public path once. `/usr/bin` is present whether
+        // the shell query succeeds (real PATH) or falls back (hardcoded), and
+        // is on the bare launchd PATH too — so this holds in any environment.
+        let path = augmented_node_path();
+        assert!(!path.is_empty());
+        assert!(path.contains("/usr/bin"), "system bin must always resolve");
     }
 }
 
