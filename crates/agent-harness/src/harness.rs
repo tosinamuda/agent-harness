@@ -324,3 +324,26 @@ pub fn run_login_command(
     }
     Ok(())
 }
+
+/// Whether an API-key value an adapter pulled from the environment counts as
+/// authenticated — i.e. present and non-blank. Adapters OR this into their
+/// [`Harness::readiness`] so a key in the env (headless / CI / container)
+/// reports authenticated, not only the CLI's own interactive OAuth login —
+/// which can't complete where there's no browser. Pure (the env read stays at
+/// the call site) so it's unit-tested directly.
+pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
+    matches!(value, Some(v) if !v.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_value_usable_requires_a_nonblank_value() {
+        assert!(api_key_value_usable(Some("sk-abc".to_owned())));
+        assert!(!api_key_value_usable(Some(String::new())));
+        assert!(!api_key_value_usable(Some("   ".to_owned())));
+        assert!(!api_key_value_usable(None));
+    }
+}

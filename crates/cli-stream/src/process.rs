@@ -425,10 +425,13 @@ fn parse_path_from_shell_output(output: &str) -> Option<String> {
 }
 
 /// Hardcoded best-effort node locations — the fallback when the login-shell
-/// query is unavailable. Covers Homebrew (both arches), the system bins, the
-/// official-installer dir, and any nvm-managed node. Misses pnpm/volta/asdf —
-/// that's what the shell query is for — but never makes things worse than the
-/// bare launchd PATH.
+/// query is unavailable. Leans on the *universal* dirs every distro + macOS
+/// share: `/usr/bin` + `/usr/local/bin` are where apt/dnf/yum/pacman and the
+/// official Node tarball install, so the common Linux container case is covered
+/// without distro-specific guessing. Plus macOS Homebrew, the official-installer
+/// dir, and any nvm-managed node. Anything manager-specific (pnpm/volta/asdf,
+/// Linuxbrew, snap, …) is what the login-shell query is for — and a missing
+/// dir is just skipped, so this is never worse than the bare launchd PATH.
 fn hardcoded_node_dirs() -> String {
     let mut parts: Vec<String> =
         vec!["/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_owned()];

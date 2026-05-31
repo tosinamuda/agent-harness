@@ -56,6 +56,12 @@ if !r.auth_configured { h.login(log)?; }               // `claude auth login` (o
 > **Auth is per-CLI.** `claude` / `codex` manage their own login; **bob** has
 > no `login()` — it reads `BOBSHELL_API_KEY` from the environment, else the OS
 > keychain (see [`bob-rs`](crates/bob-rs)).
+>
+> **Headless / containers.** `login()` opens a browser, so it can't run where
+> there's none. Instead set the CLI's API key in the environment —
+> `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `BOBSHELL_API_KEY` — and the spawned
+> CLI inherits it. `readiness()` treats a key in the env as authenticated, so a
+> container/CI run reports ready and just works; no interactive login needed.
 
 ### 3. Run a prompt
 

@@ -77,8 +77,13 @@ impl Harness for CodexHarness {
             };
         };
         // Installed — distinguish signed-in from not so the picker can
-        // offer "Sign in" instead of failing the first run.
-        let signed_in = probe_codex_signed_in();
+        // offer "Sign in" instead of failing the first run. Either the CLI's
+        // own login OR an `OPENAI_API_KEY` in the environment counts: the env
+        // key is how you run headless (a container / CI), where `codex login`
+        // can't open a browser. `codex login status` only sees the OAuth
+        // state, so we OR in the env key ourselves.
+        let signed_in = probe_codex_signed_in()
+            || crate::harness::api_key_value_usable(std::env::var("OPENAI_API_KEY").ok());
         HarnessReadiness {
             harness_id: CODEX_HARNESS_ID.to_owned(),
             ready: signed_in,
@@ -89,7 +94,7 @@ impl Harness for CodexHarness {
                 None
             } else {
                 Some(
-                    "Codex is installed but not signed in. Click Sign in to connect your ChatGPT/OpenAI account."
+                    "Codex is installed but not signed in. Click Sign in to connect your ChatGPT/OpenAI account, or set OPENAI_API_KEY."
                         .to_owned(),
                 )
             },
