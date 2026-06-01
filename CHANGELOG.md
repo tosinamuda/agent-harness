@@ -8,10 +8,20 @@ crates.io yet, so everything lives under **Unreleased** until the first release.
 ## [Unreleased]
 
 ### Added
-- **Typed errors.** `agent-harness`'s public API (`Harness::{install,run,login}`,
-  `RunControl::cancel`, `run_login_command`) returns `HarnessError`
-  (`Spawn`/`Install`/`Login`/`Cancel`/`Other`) instead of `String`, so consumers
-  can branch on the kind of failure.
+- **Typed errors, end to end.** Every crate's public API now returns a typed
+  error carrying the real underlying source, not a flattened `String`:
+  - `cli-stream` → `StreamError` (`Spawn` carries the spawn `io::Error`,
+    `PipeNotCaptured`, `CancelLockPoisoned`).
+  - `bob-rs` → `BobError` (`Io { context, source }`, `Keychain(keyring::Error)`,
+    `Serialize(serde_json::Error)`, `Invalid`, `NoDataDir`, `Stream(StreamError)`).
+  - `agent-harness` → `HarnessError`'s category variants (`Spawn`/`Install`/
+    `Login`/`Cancel`) now carry a `BoxError` **source** instead of a `String`,
+    so a consumer can `err.source().downcast_ref::<StreamError>()` /
+    `::<BobError>()`. `Display` still flattens the source into the message, so a
+    consumer that stringifies at a boundary (`.to_string()`) sees the same full
+    text as before. `StreamError` and `BobError` are re-exported from
+    `agent-harness` for downcasting; `HarnessError::{spawn,install,login,cancel}`
+    constructors box any source.
 - **`RunEvent` enrichment** — `Session` (id + model), `Usage` (input/output/total
   tokens), and tool `input`/`output`, populated by the bob/claude/codex parsers.
 - **Headless auth.** `readiness()` reports authenticated when the CLI's API-key

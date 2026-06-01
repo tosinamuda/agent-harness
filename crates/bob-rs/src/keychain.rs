@@ -31,6 +31,7 @@
 //! Writes always go to BOTH the keychain (value) and the marker
 //! file (existence flag). Deletes clear both.
 
+use crate::error::BobError;
 use crate::{KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
@@ -86,13 +87,19 @@ fn read_auth_state() -> AuthState {
     serde_json::from_slice::<AuthState>(&bytes).unwrap_or_default()
 }
 
-fn write_auth_state(state: &AuthState) -> Result<(), String> {
-    let path = auth_state_path().ok_or("could not determine data directory")?;
+fn write_auth_state(state: &AuthState) -> Result<(), BobError> {
+    let path = auth_state_path().ok_or(BobError::NoDataDir)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(parent).map_err(|source| BobError::Io {
+            context: "create auth-state directory",
+            source,
+        })?;
     }
-    let bytes = serde_json::to_vec_pretty(state).map_err(|e| e.to_string())?;
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+    let bytes = serde_json::to_vec_pretty(state)?;
+    std::fs::write(&path, bytes).map_err(|source| BobError::Io {
+        context: "write auth-state marker",
+        source,
+    })
 }
 
 /// Process-wide cache of the resolved key. Populated on first
@@ -163,12 +170,12 @@ pub fn read_api_key() -> Option<String> {
 /// The keychain write is what triggers a one-time macOS prompt
 /// the first time the user saves a key; subsequent overwrites by
 /// the same app are silent.
-pub fn write_api_key(key: &str) -> Result<(), String> {
+pub fn write_api_key(key: &str) -> Result<(), BobError> {
     if key.trim().is_empty() {
-        return Err("API key must be non-empty".to_owned());
+        return Err(BobError::Invalid("API key must be non-empty".to_owned()));
     }
-    let entry = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).map_err(|e| e.to_string())?;
-    entry.set_password(key).map_err(|e| e.to_string())?;
+    let entry = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)?;
+    entry.set_password(key)?;
     // Mark the existence so future boots don't need to touch the
     // keychain to know the user has a key.
     write_auth_state(&AuthState {
@@ -184,11 +191,11 @@ pub fn write_api_key(key: &str) -> Result<(), String> {
 
 /// Remove the keychain entry and clear the marker. No-op for
 /// each step if the corresponding state isn't there.
-pub fn delete_api_key() -> Result<(), String> {
+pub fn delete_api_key() -> Result<(), BobError> {
     if let Ok(entry) = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(err) => return Err(err.to_string()),
+            Err(err) => return Err(BobError::Keychain(err)),
         }
     }
     write_auth_state(&AuthState {

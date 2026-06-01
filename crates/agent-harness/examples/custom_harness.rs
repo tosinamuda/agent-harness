@@ -109,7 +109,7 @@ impl Harness for EchoHarness {
                 }
             },
         )
-        .map_err(HarnessError::Spawn)?;
+        .map_err(HarnessError::spawn)?;
         Ok(Box::new(handle))
     }
 }

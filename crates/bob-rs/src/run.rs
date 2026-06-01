@@ -6,6 +6,7 @@
 //! module is the bob-specific layer on top — the chat-mode / approval
 //! flags, `RunBobOptions`, and injecting bob's `BOBSHELL_API_KEY`.
 
+use crate::error::BobError;
 use crate::keychain::resolve_api_key;
 use cli_stream::{spawn_streaming, ProcessEvent, ProcessHandle};
 use serde::{Deserialize, Serialize};
@@ -96,7 +97,7 @@ pub fn spawn_bob<F>(
     opts: RunBobOptions,
     run_id: String,
     callback: F,
-) -> Result<ProcessHandle, String>
+) -> Result<ProcessHandle, BobError>
 where
     F: FnMut(ProcessEvent) + Send + Sync + Clone + 'static,
 {
@@ -111,7 +112,7 @@ where
 /// resolved the bob executable path, and loaded the API key themselves
 /// (the Tauri runner, which carries its own locator + workspace-aware
 /// argv builder). Thin bob-specific wrapper over
-/// [`agent_harness::spawn_streaming`]: sets bob's `BOBSHELL_API_KEY` env
+/// [`cli_stream::spawn_streaming`]: sets bob's `BOBSHELL_API_KEY` env
 /// var, otherwise identical.
 pub fn spawn_bob_raw<F>(
     program: PathBuf,
@@ -120,18 +121,19 @@ pub fn spawn_bob_raw<F>(
     cwd: PathBuf,
     run_id: String,
     callback: F,
-) -> Result<ProcessHandle, String>
+) -> Result<ProcessHandle, BobError>
 where
     F: FnMut(ProcessEvent) + Send + Sync + Clone + 'static,
 {
-    spawn_streaming(
+    let handle = spawn_streaming(
         program,
         args,
         vec![("BOBSHELL_API_KEY".to_owned(), api_key)],
         cwd,
         run_id,
         callback,
-    )
+    )?; // cli_stream::StreamError → BobError::Stream
+    Ok(handle)
 }
 
 /// Build the bob CLI argv. Mirrors the structure used by both the Vite

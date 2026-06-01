@@ -9,8 +9,10 @@ No agent / LLM / harness knowledge — just process streaming, useful to
 anyone driving a child CLI.
 
 - `spawn_streaming(program, args, env, cwd, run_id, callback)` → returns a
-  `ProcessHandle`; emits `ProcessEvent`s (Started / Stdout / Stderr / Error
-  / Exited) to the callback from reader threads.
+  `ProcessHandle` (or a typed `StreamError` — `Spawn` carries the underlying
+  `io::Error`, so you can tell "not on PATH" from "permission denied"); emits
+  `ProcessEvent`s (Started / Stdout / Stderr / Error / Exited) to the callback
+  from reader threads.
 - `ProcessHandle::cancel()` — SIGTERM, then SIGKILL after a grace period.
 - `augmented_node_path()` — the PATH-augmentation helper (nvm / Homebrew /
   official installers), so packaged apps find `node`.

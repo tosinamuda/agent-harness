@@ -16,8 +16,10 @@
 //! `agent-harness` (the framework) depend on it, which is what lets
 //! `bob-rs` stay standalone without a dependency cycle.
 
+pub mod error;
 pub mod install;
 pub mod process;
 
+pub use error::StreamError;
 pub use install::InstallEvent;
 pub use process::{augmented_node_path, spawn_streaming, ProcessEvent, ProcessHandle};

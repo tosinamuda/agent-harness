@@ -10,9 +10,9 @@
 
 use std::sync::mpsc::sync_channel;
 
-use bob_rs::{spawn_bob, BobApprovalMode, BobChatMode, ProcessEvent, RunBobOptions};
+use bob_rs::{spawn_bob, BobApprovalMode, BobChatMode, BobError, ProcessEvent, RunBobOptions};
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), BobError> {
     let (tx, rx) = sync_channel::<ProcessEvent>(256);
 
     let _handle = spawn_bob(

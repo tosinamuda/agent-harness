@@ -31,15 +31,17 @@ pub use events::{
 };
 pub use raw::parse_raw_line;
 pub use harness::{
-    run_login_command, CredentialSpec, Harness, HarnessCapabilities, HarnessError, HarnessInfo,
-    HarnessModel, HarnessReadiness, InstallCallback, ReasoningEffort, RunCallback, RunControl,
-    RunHandle, RunMode, RunRequest, RunTuning,
+    run_login_command, BoxError, CredentialSpec, Harness, HarnessCapabilities, HarnessError,
+    HarnessInfo, HarnessModel, HarnessReadiness, InstallCallback, ReasoningEffort, RunCallback,
+    RunControl, RunHandle, RunMode, RunRequest, RunTuning,
 };
 // The generic subprocess engine + the install/process event shapes live in
 // the `cli-stream` leaf; re-export them so adapters + consumers reach them
-// through the framework (e.g. `use harness::spawn_streaming`).
+// through the framework (e.g. `use harness::spawn_streaming`). `StreamError`
+// is re-exported too so a consumer can `downcast_ref` a `HarnessError`'s
+// source back to the typed spawn/cancel error.
 pub use cli_stream::{
-    augmented_node_path, spawn_streaming, InstallEvent, ProcessEvent, ProcessHandle,
+    augmented_node_path, spawn_streaming, InstallEvent, ProcessEvent, ProcessHandle, StreamError,
 };
 
 #[cfg(feature = "bob")]
@@ -54,6 +56,10 @@ pub mod registry;
 // `use harness::{Bob, Claude, Codex}` — each gated behind its feature.
 #[cfg(feature = "bob")]
 pub use bob::{normalize_bob_event, BobHarness as Bob, BOB_HARNESS_ID};
+// bob's typed error, re-exported so a consumer can `downcast_ref` a bob
+// `HarnessError`'s source (install / keychain / spawn) back to `BobError`.
+#[cfg(feature = "bob")]
+pub use bob_rs::BobError;
 #[cfg(feature = "claude")]
 pub use claude::{ClaudeHarness as Claude, CLAUDE_HARNESS_ID};
 #[cfg(feature = "codex")]

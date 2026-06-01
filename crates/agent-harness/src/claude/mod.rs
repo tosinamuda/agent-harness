@@ -116,7 +116,7 @@ impl Harness for ClaudeHarness {
             .args(["install", "-g", "@anthropic-ai/claude-code"])
             .env("PATH", crate::augmented_node_path())
             .output()
-            .map_err(|e| HarnessError::Install(format!("failed to run npm: {e}")))?;
+            .map_err(|e| HarnessError::install(format!("failed to run npm: {e}")))?;
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             (*on_event)(InstallEvent::Stdout {
                 text: line.to_owned(),
@@ -154,7 +154,7 @@ impl Harness for ClaudeHarness {
                 }
             },
         )
-        .map_err(HarnessError::Spawn)?;
+        .map_err(HarnessError::spawn)?;
         Ok(Box::new(handle))
     }
 

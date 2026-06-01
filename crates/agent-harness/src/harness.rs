@@ -41,31 +41,72 @@ pub type InstallCallback = Arc<dyn Fn(InstallEvent) + Send + Sync>;
 
 // --- Errors ---------------------------------------------------------
 
+/// A boxed, type-erased error source. The [`HarnessError`] variants carry one
+/// of these instead of `#[from]`-ing a single concrete type, because each
+/// *category* can be produced by more than one underlying error: a `Spawn`
+/// failure is a [`cli_stream::StreamError`] for the claude/codex adapters but a
+/// `bob_rs::BobError` for bob. The real error stays reachable through
+/// [`std::error::Error::source`] (and `downcast_ref`); the category is the
+/// variant.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 /// Why a [`Harness`] operation failed. Returned by `install` / `run` /
 /// `login` / [`RunControl::cancel`] so a consumer can branch on the *kind* of
 /// failure — offer install vs sign-in vs surface the message — instead of
-/// string-matching. `#[non_exhaustive]` so adding a variant later (e.g. a
-/// typed spawn source) isn't a breaking change.
+/// string-matching.
+///
+/// Each category carries the real underlying error as a [`source`] (via the
+/// [`BoxError`] field), so a consumer that wants more than the category can
+/// walk `.source()` or `downcast_ref::<cli_stream::StreamError>()` /
+/// `::<bob_rs::BobError>()`. The `Display` still flattens the source into the
+/// message (`"failed to start the agent: <source>"`), so a consumer that just
+/// stringifies at a boundary (e.g. a Tauri command's `.to_string()`) gets the
+/// same full message as before. `#[non_exhaustive]` so adding a variant later
+/// isn't a breaking change.
+///
+/// [`source`]: std::error::Error::source
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum HarnessError {
     /// The harness's CLI couldn't be started — not installed, not on `PATH`,
     /// or an OS-level spawn failure.
     #[error("failed to start the agent: {0}")]
-    Spawn(String),
+    Spawn(#[source] BoxError),
     /// A one-time install step failed.
     #[error("install failed: {0}")]
-    Install(String),
+    Install(#[source] BoxError),
     /// Interactive sign-in failed.
     #[error("sign-in failed: {0}")]
-    Login(String),
+    Login(#[source] BoxError),
     /// Cancelling an in-flight run failed.
     #[error("cancel failed: {0}")]
-    Cancel(String),
+    Cancel(#[source] BoxError),
     /// Any other adapter/runtime failure (e.g. a backend SDK error that
-    /// doesn't map onto the cases above).
+    /// doesn't map onto the cases above). Carries a message rather than a
+    /// source — it's the catch-all when there's nothing typed to preserve.
     #[error("{0}")]
     Other(String),
+}
+
+impl HarnessError {
+    /// Categorize a source error as a [`Spawn`](HarnessError::Spawn) failure.
+    /// Accepts anything boxable — a typed `StreamError`/`BobError`, or a
+    /// `String`/`&str` for adapters with nothing typed to carry.
+    pub fn spawn(source: impl Into<BoxError>) -> Self {
+        Self::Spawn(source.into())
+    }
+    /// Categorize a source error as an [`Install`](HarnessError::Install) failure.
+    pub fn install(source: impl Into<BoxError>) -> Self {
+        Self::Install(source.into())
+    }
+    /// Categorize a source error as a [`Login`](HarnessError::Login) failure.
+    pub fn login(source: impl Into<BoxError>) -> Self {
+        Self::Login(source.into())
+    }
+    /// Categorize a source error as a [`Cancel`](HarnessError::Cancel) failure.
+    pub fn cancel(source: impl Into<BoxError>) -> Self {
+        Self::Cancel(source.into())
+    }
 }
 
 // --- Run control (cancellation) -------------------------------------
@@ -89,7 +130,7 @@ pub type RunHandle = Box<dyn RunControl>;
 // (orphan rule) rather than in any adapter crate.
 impl RunControl for ProcessHandle {
     fn cancel(&self) -> Result<(), HarnessError> {
-        ProcessHandle::cancel(self).map_err(HarnessError::Cancel)
+        ProcessHandle::cancel(self).map_err(HarnessError::cancel)
     }
     fn was_cancelled(&self) -> bool {
         ProcessHandle::was_cancelled(self)
@@ -292,8 +333,8 @@ pub trait Harness: Send + Sync {
     /// `Done { ok }` reports success. Default: unsupported — harnesses
     /// that Compose authenticates itself (bob, via its API key) keep it.
     fn login(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
-        Err(HarnessError::Login(
-            "This harness does not support interactive sign-in.".to_owned(),
+        Err(HarnessError::login(
+            "This harness does not support interactive sign-in.",
         ))
     }
 
@@ -390,7 +431,7 @@ pub fn run_login_command(
             }
         },
     )
-    .map_err(HarnessError::Login)?;
+    .map_err(HarnessError::login)?;
     let (lock, cvar) = &*done;
     let mut finished = lock.lock().unwrap_or_else(|p| p.into_inner());
     while !*finished {
@@ -527,5 +568,29 @@ mod tests {
         let harness = MockHarness { events: Vec::new() };
         let (_handle, rx) = harness.run_channel(demo_request()).expect("run_channel ok");
         assert_eq!(rx.into_iter().count(), 0); // closes immediately, doesn't hang
+    }
+
+    #[test]
+    fn harness_error_preserves_typed_source_and_flattened_message() {
+        use std::error::Error;
+
+        // Categorize a real typed engine error as a Spawn failure.
+        let err = HarnessError::spawn(cli_stream::StreamError::PipeNotCaptured { stream: "stdout" });
+
+        // Display still flattens the source into the message, so a consumer
+        // that just `.to_string()`s at a boundary (a Tauri command) gets the
+        // category prefix *and* the full underlying detail — unchanged from
+        // when the variant held a String.
+        let message = err.to_string();
+        assert!(message.starts_with("failed to start the agent: "), "got {message:?}");
+        assert!(message.contains("stdout pipe was not captured"), "got {message:?}");
+
+        // And the real typed error is reachable via the source chain — the
+        // whole point of carrying a source instead of a flattened string.
+        let source = err.source().expect("HarnessError::Spawn has a source");
+        assert!(
+            source.downcast_ref::<cli_stream::StreamError>().is_some(),
+            "source should downcast back to the typed StreamError"
+        );
     }
 }

@@ -24,6 +24,9 @@ categories = ["command-line-utilities"]
 cli-stream = { path = "../cli-stream", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Typed errors (BobError) carrying real io::Error / keyring::Error /
+# serde_json::Error / cli_stream::StreamError sources. Build-time proc-macro.
+thiserror = "2"
 # Tempfile is needed to spool the embedded `install-bob.sh` to
 # disk before exec'ing it. The script ships as a string constant
 # (`include_str!`) so the consumer doesn't need to ship a separate

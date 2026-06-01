@@ -43,9 +43,9 @@ The env var **wins** when both are set. So: export `BOBSHELL_API_KEY`, or call
 
 ```rust
 use std::sync::mpsc::sync_channel;
-use bob_rs::{spawn_bob, BobApprovalMode, BobChatMode, ProcessEvent, RunBobOptions};
+use bob_rs::{spawn_bob, BobApprovalMode, BobChatMode, BobError, ProcessEvent, RunBobOptions};
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), BobError> {
     // Auth: `BOBSHELL_API_KEY` — read from the env if set, else the OS
     // keychain (store there once via `bob_rs::write_api_key`). `bob` on PATH.
     let (tx, rx) = sync_channel::<ProcessEvent>(256);

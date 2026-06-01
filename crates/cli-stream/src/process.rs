@@ -12,6 +12,7 @@
 //! sends SIGTERM (with a SIGKILL fallback) and flips an atomic
 //! `cancelled` flag the reader threads use to short-circuit.
 
+use crate::error::StreamError;
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -53,11 +54,12 @@ pub enum ProcessEvent {
 /// Dropping the handle does NOT cancel the run — the reader threads +
 /// wait thread continue independently. Use `cancel()` explicitly when
 /// the user closes the connection.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProcessHandle {
     inner: Arc<HandleInner>,
 }
 
+#[derive(Debug)]
 struct HandleInner {
     child: Mutex<Option<Child>>,
     cancelled: AtomicBool,
@@ -67,13 +69,13 @@ impl ProcessHandle {
     /// SIGTERM the process, then SIGKILL after 1.5s if it's still alive.
     /// The CLI is supposed to flush a final result on SIGTERM but we
     /// don't trust it to do so forever.
-    pub fn cancel(&self) -> Result<(), String> {
+    pub fn cancel(&self) -> Result<(), StreamError> {
         self.inner.cancelled.store(true, Ordering::SeqCst);
         let mut guard = self
             .inner
             .child
             .lock()
-            .map_err(|e| format!("cancel lock: {e}"))?;
+            .map_err(|_| StreamError::CancelLockPoisoned)?;
         let Some(child) = guard.as_mut() else {
             // Already exited.
             return Ok(());
@@ -134,7 +136,7 @@ pub fn spawn_streaming<F>(
     cwd: PathBuf,
     run_id: String,
     callback: F,
-) -> Result<ProcessHandle, String>
+) -> Result<ProcessHandle, StreamError>
 where
     F: FnMut(ProcessEvent) + Send + Sync + Clone + 'static,
 {
@@ -160,12 +162,19 @@ where
     for (key, value) in &env {
         command.env(key, value);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("failed to spawn {}: {e}", program.display()))?;
+    let mut child = command.spawn().map_err(|source| StreamError::Spawn {
+        program: program.display().to_string(),
+        source,
+    })?;
 
-    let stdout = child.stdout.take().ok_or("child stdout was not captured")?;
-    let stderr = child.stderr.take().ok_or("child stderr was not captured")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(StreamError::PipeNotCaptured { stream: "stdout" })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or(StreamError::PipeNotCaptured { stream: "stderr" })?;
 
     let inner = Arc::new(HandleInner {
         child: Mutex::new(Some(child)),
@@ -676,6 +685,16 @@ mod lifecycle {
             "t".to_owned(),
             |_ev: ProcessEvent| {},
         );
-        assert!(result.is_err(), "spawning a missing binary must Err");
+        // Typed: a `Spawn` error carrying the OS `NotFound` io::Error as its
+        // source — the whole point of `StreamError` over a `String`. A caller
+        // can branch on `ErrorKind` to tell "not installed" (NotFound) from
+        // "permission denied", which a flattened string can't support.
+        match result {
+            Err(StreamError::Spawn { program, source }) => {
+                assert!(program.contains("cli-stream-no-such-binary-zzz"));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected StreamError::Spawn, got {other:?}"),
+        }
     }
 }

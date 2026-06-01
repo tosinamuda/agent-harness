@@ -16,11 +16,13 @@
 //! type generation today.
 
 pub mod check;
+pub mod error;
 pub mod install;
 pub mod keychain;
 pub mod run;
 
 pub use check::{get_readiness, BobReadinessSnapshot};
+pub use error::BobError;
 pub use install::install_bob;
 pub use keychain::{
     auth_source, delete_api_key, read_api_key, resolve_api_key, write_api_key, KeySource,
