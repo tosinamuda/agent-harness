@@ -40,6 +40,8 @@ fn main() -> Result<(), BobError> {
                 break;
             }
             ProcessEvent::Started { .. } => {}
+            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
+            _ => {}
         }
     }
     Ok(())
