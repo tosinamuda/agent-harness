@@ -22,8 +22,13 @@ crates.io yet, so everything lives under **Unreleased** until the first release.
   Homebrew), cached once, with a hardcoded fallback.
 - The harness-agnostic raw tier `parse_raw_line`, the open `Registry`, and the
   `custom_harness` example (compose your own harness from the published pieces).
-- A local quality gate, `scripts/check.sh` (fmt + clippy + test + build), and a
-  `deny.toml` for `cargo deny`.
+- **`Harness::run_channel()`** — a provided method that starts a run and returns
+  its `RunEvent`s on an `mpsc` receiver, so callers can `for ev in rx { … }`
+  instead of hand-writing the `Arc::new(move |ev| tx.send(ev))` callback. The
+  receiver hangs up on its own when the run ends. `run()` stays for push
+  semantics (forwarding onto a Tauri Channel / SSE sink from the callback).
+- A local quality gate, `scripts/check.sh` (clippy `-D warnings` + test + build +
+  feature-gate builds + `cargo deny` when installed), and a `deny.toml`.
 
 ### Changed
 - **`RunEvent` and `ProcessEvent` are `#[non_exhaustive]`** — new event kinds are
@@ -40,3 +45,9 @@ crates.io yet, so everything lives under **Unreleased** until the first release.
 - `augmented_node_path()` keeps only absolute `PATH` entries — a relative/empty
   entry (e.g. a direnv `node_modules/.bin`) can no longer run a planted binary
   from the spawn cwd.
+- **`bob-rs` keychain now persists on Linux and Windows, not just macOS.** The
+  `keyring` dependency was built with `apple-native` only, so on other platforms
+  it fell back to a no-op store and silently dropped saved keys. It now selects a
+  native backend per OS — Keychain (macOS), Credential Manager (Windows), Secret
+  Service over D-Bus with a pure-Rust encrypted session (Linux). Headless Linux
+  (no Secret Service daemon) is unaffected: the key comes from `BOBSHELL_API_KEY`.

@@ -21,7 +21,7 @@
 //!   one shape regardless of which harness produced it.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -296,6 +296,45 @@ pub trait Harness: Send + Sync {
             "This harness does not support interactive sign-in.".to_owned(),
         ))
     }
+
+    /// Convenience over [`run`](Harness::run) for callers that want to
+    /// *pull* events off a channel instead of supplying a push callback.
+    /// Forwards each [`RunEvent`] into an `mpsc` channel and hands the
+    /// receiver back alongside the run handle, so the caller can simply
+    /// `for event in rx { … }` rather than re-write the
+    /// `Arc::new(move |ev| tx.send(ev))` plumbing at every call site.
+    ///
+    /// The receiver hangs up when the run ends — and on its own, without
+    /// the caller dropping the [`RunHandle`] first. The forwarding callback
+    /// (and the `Sender` it owns) lives only on the engine's reader
+    /// threads; once the process exits and those threads finish, every
+    /// clone of the callback drops, the `Sender` drops, and the `for` loop
+    /// over `rx` terminates. (Dropping the handle never cancels a run — see
+    /// [`RunControl`] — so it is safe to drain `rx` to completion while
+    /// still holding the handle for a possible [`cancel`](RunControl::cancel).)
+    ///
+    /// Prefer [`run`](Harness::run) directly when you need push semantics —
+    /// e.g. forwarding straight onto a Tauri `Channel` or an SSE sink from
+    /// inside the callback — where an intermediate channel is just an extra
+    /// hop. This is a provided method (not overridable surface): adapters
+    /// implement only `run`, and every harness — built-in or third-party —
+    /// gets `run_channel` for free.
+    fn run_channel(
+        &self,
+        request: RunRequest,
+    ) -> Result<(RunHandle, mpsc::Receiver<RunEvent>), HarnessError> {
+        let (tx, rx) = mpsc::channel();
+        let handle = self.run(
+            request,
+            Arc::new(move |event| {
+                // A hung-up receiver (consumer stopped early) is not an
+                // error: the run keeps streaming; we just drop the event
+                // nobody is waiting for.
+                let _ = tx.send(event);
+            }),
+        )?;
+        Ok((handle, rx))
+    }
 }
 
 /// Run a harness's interactive sign-in command, streaming its output as
@@ -375,15 +414,118 @@ pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
     matches!(value, Some(v) if !v.trim().is_empty())
 }
 
-#[cfg(all(test, any(feature = "claude", feature = "codex")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    // Gated like the fn it tests — `api_key_value_usable` only exists when a
+    // claude/codex adapter is compiled in.
+    #[cfg(any(feature = "claude", feature = "codex"))]
     #[test]
     fn api_key_value_usable_requires_a_nonblank_value() {
         assert!(api_key_value_usable(Some("sk-abc".to_owned())));
         assert!(!api_key_value_usable(Some(String::new())));
         assert!(!api_key_value_usable(Some("   ".to_owned())));
         assert!(!api_key_value_usable(None));
+    }
+
+    /// A no-op [`RunControl`] so the mock harness below can hand back a
+    /// [`RunHandle`] without a real process behind it.
+    struct NoopControl;
+    impl RunControl for NoopControl {
+        fn cancel(&self) -> Result<(), HarnessError> {
+            Ok(())
+        }
+        fn was_cancelled(&self) -> bool {
+            false
+        }
+    }
+
+    /// A minimal in-memory harness whose `run()` pushes a fixed event
+    /// sequence straight to the callback, synchronously, then returns —
+    /// dropping its only `RunCallback` clone. That's exactly the ownership
+    /// shape `run_channel` relies on, with no subprocess to spawn, so it
+    /// pins down the contract: events are forwarded, and the receiver hangs
+    /// up on its own once the run's callback ownership ends.
+    struct MockHarness {
+        events: Vec<RunEvent>,
+    }
+    impl Harness for MockHarness {
+        fn info(&self) -> HarnessInfo {
+            unreachable!("not exercised by run_channel")
+        }
+        fn readiness(&self) -> HarnessReadiness {
+            unreachable!("not exercised by run_channel")
+        }
+        fn install(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
+            Ok(())
+        }
+        fn run(
+            &self,
+            _request: RunRequest,
+            on_event: RunCallback,
+        ) -> Result<RunHandle, HarnessError> {
+            for event in &self.events {
+                on_event(event.clone());
+            }
+            // `on_event` (the lone RunCallback clone, owning the channel's
+            // Sender) drops as this returns → the receiver closes.
+            Ok(Box::new(NoopControl))
+        }
+        fn credential(&self) -> CredentialSpec {
+            unreachable!("not exercised by run_channel")
+        }
+    }
+
+    fn demo_request() -> RunRequest {
+        RunRequest {
+            run_id: "t".to_owned(),
+            prompt: "hi".to_owned(),
+            cwd: None,
+            mode: RunMode::Ask,
+            tuning: RunTuning::default(),
+        }
+    }
+
+    #[test]
+    fn run_channel_forwards_every_event_then_closes() {
+        let harness = MockHarness {
+            events: vec![
+                RunEvent::Text {
+                    run_id: "t".to_owned(),
+                    delta: "hello".to_owned(),
+                },
+                RunEvent::Exited {
+                    run_id: "t".to_owned(),
+                    exit_code: Some(0),
+                    cancelled: false,
+                },
+            ],
+        };
+        let (_handle, rx) = harness.run_channel(demo_request()).expect("run_channel ok");
+        // Draining to completion *terminates* — proof the channel closed
+        // without us dropping the handle.
+        let collected: Vec<RunEvent> = rx.into_iter().collect();
+        assert_eq!(
+            collected,
+            vec![
+                RunEvent::Text {
+                    run_id: "t".to_owned(),
+                    delta: "hello".to_owned(),
+                },
+                RunEvent::Exited {
+                    run_id: "t".to_owned(),
+                    exit_code: Some(0),
+                    cancelled: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn run_channel_receiver_closes_even_with_no_events() {
+        let harness = MockHarness { events: Vec::new() };
+        let (_handle, rx) = harness.run_channel(demo_request()).expect("run_channel ok");
+        assert_eq!(rx.into_iter().count(), 0); // closes immediately, doesn't hang
     }
 }
