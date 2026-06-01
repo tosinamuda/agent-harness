@@ -129,6 +129,29 @@ impl ProcessHandle {
 /// reader, exit watcher); the `Clone` bound lets us hand a copy to each.
 /// `run_id` is opaque — the caller chooses it and uses it to correlate
 /// events with the handle.
+///
+/// ```no_run
+/// use cli_stream::{spawn_streaming, ProcessEvent};
+/// use std::path::PathBuf;
+///
+/// # fn main() -> Result<(), cli_stream::StreamError> {
+/// let handle = spawn_streaming(
+///     PathBuf::from("echo"),
+///     vec!["hello".to_owned()],
+///     Vec::new(),                      // extra env vars (key, value)
+///     std::env::current_dir().unwrap(),
+///     "run-1".to_owned(),              // your correlation id
+///     |event| match event {
+///         ProcessEvent::Stdout { line, .. } => println!("{line}"),
+///         ProcessEvent::Exited { exit_code, .. } => eprintln!("exit {exit_code:?}"),
+///         _ => {}
+///     },
+/// )?;
+/// // `handle.cancel()` stops it early; dropping the handle does not.
+/// let _ = handle;
+/// # Ok(())
+/// # }
+/// ```
 pub fn spawn_streaming<F>(
     program: PathBuf,
     args: Vec<String>,
@@ -628,6 +651,30 @@ mod lifecycle {
             events.last(),
             Some(ProcessEvent::Exited { exit_code: Some(3), cancelled: false, .. })
         ));
+    }
+
+    #[test]
+    fn env_vars_are_passed_to_the_child() {
+        // The `env` argument must reach the child's environment — exercise it
+        // directly (the other lifecycle tests pass an empty env).
+        let (cb, events, done) = collector();
+        let _handle = spawn_streaming(
+            PathBuf::from("sh"),
+            vec!["-c".to_owned(), "printf '%s\\n' \"$CLI_STREAM_STUB\"".to_owned()],
+            vec![("CLI_STREAM_STUB".to_owned(), "from-env".to_owned())],
+            PathBuf::from("."),
+            "t".to_owned(),
+            cb,
+        )
+        .expect("spawn");
+        wait_done(&done, 10);
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProcessEvent::Stdout { line, .. } if line == "from-env")),
+            "child should observe the injected env var, got {events:?}"
+        );
     }
 
     #[test]

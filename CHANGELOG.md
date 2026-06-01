@@ -39,6 +39,12 @@ crates.io yet, so everything lives under **Unreleased** until the first release.
   semantics (forwarding onto a Tauri Channel / SSE sink from the callback).
 - A local quality gate, `scripts/check.sh` (clippy `-D warnings` + test + build +
   feature-gate builds + `cargo deny` when installed), and a `deny.toml`.
+- **Testable docs + real-I/O coverage.** Runnable/`no_run` doctests on the
+  headline APIs (`spawn_streaming`, `Harness::run_channel`, `HarnessError`,
+  `Registry`) so the documented code can't drift from the API; a stub-process
+  integration test (`tests/stub_run.rs`) that drives a real `sh` child through
+  the full spawn → stream → normalize → channel/cancel path; and an
+  env-passthrough engine test.
 
 ### Changed
 - **`RunEvent` and `ProcessEvent` are `#[non_exhaustive]`** — new event kinds are

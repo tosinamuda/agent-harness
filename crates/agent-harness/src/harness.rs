@@ -64,6 +64,23 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// same full message as before. `#[non_exhaustive]` so adding a variant later
 /// isn't a breaking change.
 ///
+/// ```
+/// use harness::{HarnessError, StreamError};
+/// use std::error::Error;
+///
+/// // Box any typed source under a category constructor:
+/// let err = HarnessError::spawn(StreamError::PipeNotCaptured { stream: "stdout" });
+///
+/// // Stringifying at a boundary flattens the source into the message
+/// // (so a Tauri command's `.to_string()` keeps its full text)…
+/// assert!(err.to_string().starts_with("failed to start the agent: "));
+///
+/// // …while the real typed cause stays reachable for a consumer that wants
+/// // to branch on it rather than parse a string.
+/// let source = err.source().expect("Spawn carries a source");
+/// assert!(source.downcast_ref::<StreamError>().is_some());
+/// ```
+///
 /// [`source`]: std::error::Error::source
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -360,6 +377,28 @@ pub trait Harness: Send + Sync {
     /// hop. This is a provided method (not overridable surface): adapters
     /// implement only `run`, and every harness — built-in or third-party —
     /// gets `run_channel` for free.
+    ///
+    /// ```no_run
+    /// use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
+    ///
+    /// # fn main() -> Result<(), harness::HarnessError> {
+    /// let (_handle, rx) = Claude::new().run_channel(RunRequest {
+    ///     run_id: "demo".into(),
+    ///     prompt: "Explain Markdown headings in one sentence.".into(),
+    ///     cwd: None,
+    ///     mode: RunMode::Ask,
+    ///     tuning: RunTuning::default(),
+    /// })?;
+    /// for event in rx {
+    ///     match event {
+    ///         RunEvent::Text { delta, .. } => print!("{delta}"),
+    ///         RunEvent::Exited { .. } => break,
+    ///         _ => {}
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     fn run_channel(
         &self,
         request: RunRequest,
