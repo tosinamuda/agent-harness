@@ -2,6 +2,7 @@
 name = "bob-rs"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.74"
 description = "Unofficial Rust SDK for the bob agent CLI — detection, install, keychain, run. Not affiliated with or endorsed by the bob maintainers."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
