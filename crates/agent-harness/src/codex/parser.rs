@@ -157,6 +157,8 @@ impl CodexStreamParser {
                 out
             }
             ProcessEvent::Stdout { run_id, line } => self.on_stdout(&run_id, &line),
+            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
+            _ => Vec::new(),
         }
     }
 

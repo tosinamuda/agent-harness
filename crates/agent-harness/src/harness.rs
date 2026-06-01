@@ -349,6 +349,8 @@ pub fn run_login_command(
                 *lock.lock().unwrap_or_else(|p| p.into_inner()) = true;
                 cvar.notify_all();
             }
+            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
+            _ => {}
         },
     )
     .map_err(HarnessError::Login)?;

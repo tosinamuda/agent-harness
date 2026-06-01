@@ -78,6 +78,10 @@ pub struct ToolCallEnd {
 // is required to get `runId` / `exitCode` on the wire rather than the
 // snake_case Rust idents.
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+// New event kinds (a richer Usage, a new lifecycle signal, …) can be added
+// without breaking consumers — they must carry a `_` arm. Adding `Session` /
+// `Usage` earlier was a breaking change precisely because this was missing.
+#[non_exhaustive]
 pub enum RunEvent {
     /// First event, before any output. UI shows "thinking…". Fired the
     /// instant the process spawns — *before* the CLI reports its
@@ -237,6 +241,9 @@ pub fn normalize_process_event(
             }
         }
         ProcessEvent::Stdout { run_id, line } => run_events_from_parsed(&run_id, parse_line(&line)),
+        // `ProcessEvent` is #[non_exhaustive]; a future variant yields no
+        // events until an adapter learns to handle it.
+        _ => Vec::new(),
     }
 }
 

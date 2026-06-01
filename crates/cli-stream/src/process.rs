@@ -27,6 +27,10 @@ use std::time::Duration;
 /// `Stdout` lines into a normalized event vocabulary (e.g. `agent-harness`'s `RunEvent`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+// New lifecycle events can be added without breaking downstream matches —
+// consumers must carry a `_` arm. (Construction of existing variants is
+// unaffected, so it's still ergonomic to build them.)
+#[non_exhaustive]
 pub enum ProcessEvent {
     /// First event. Sent before the child has produced any output so the
     /// UI can show a "thinking…" state.
