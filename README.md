@@ -105,6 +105,11 @@ fn main() -> Result<(), HarnessError> {
 }
 ```
 
+`install` / `run` / `login` / `cancel` return `Result<_, HarnessError>` — a
+typed error you can `match` on (`Spawn` / `Install` / `Login` / `Cancel` /
+`Other`) to react to the *kind* of failure, or just stringify at your boundary
+(`.map_err(|e| e.to_string())`, e.g. inside a Tauri command).
+
 Prefer to pick a harness by string id (e.g. from a config field)? Use the registry:
 
 ```rust
