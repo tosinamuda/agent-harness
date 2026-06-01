@@ -366,11 +366,16 @@ pub fn run_login_command(
 /// reports authenticated, not only the CLI's own interactive OAuth login —
 /// which can't complete where there's no browser. Pure (the env read stays at
 /// the call site) so it's unit-tested directly.
+///
+/// Only the claude/codex adapters OR this into readiness — bob reports auth via
+/// `bob-rs`'s own keychain source — so it's gated to those features. Without
+/// them (`--no-default-features`) it would be dead code, hence the `cfg`.
+#[cfg(any(feature = "claude", feature = "codex"))]
 pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
     matches!(value, Some(v) if !v.trim().is_empty())
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "claude", feature = "codex")))]
 mod tests {
     use super::*;
 
