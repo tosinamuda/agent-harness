@@ -12,6 +12,7 @@
 //! sends SIGTERM (with a SIGKILL fallback) and flips an atomic
 //! `cancelled` flag the reader threads use to short-circuit.
 
+use crate::error::StreamError;
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,10 @@ use std::time::Duration;
 /// `Stdout` lines into a normalized event vocabulary (e.g. `agent-harness`'s `RunEvent`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+// New lifecycle events can be added without breaking downstream matches —
+// consumers must carry a `_` arm. (Construction of existing variants is
+// unaffected, so it's still ergonomic to build them.)
+#[non_exhaustive]
 pub enum ProcessEvent {
     /// First event. Sent before the child has produced any output so the
     /// UI can show a "thinking…" state.
@@ -53,11 +58,12 @@ pub enum ProcessEvent {
 /// Dropping the handle does NOT cancel the run — the reader threads +
 /// wait thread continue independently. Use `cancel()` explicitly when
 /// the user closes the connection.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProcessHandle {
     inner: Arc<HandleInner>,
 }
 
+#[derive(Debug)]
 struct HandleInner {
     child: Mutex<Option<Child>>,
     cancelled: AtomicBool,
@@ -67,13 +73,13 @@ impl ProcessHandle {
     /// SIGTERM the process, then SIGKILL after 1.5s if it's still alive.
     /// The CLI is supposed to flush a final result on SIGTERM but we
     /// don't trust it to do so forever.
-    pub fn cancel(&self) -> Result<(), String> {
+    pub fn cancel(&self) -> Result<(), StreamError> {
         self.inner.cancelled.store(true, Ordering::SeqCst);
         let mut guard = self
             .inner
             .child
             .lock()
-            .map_err(|e| format!("cancel lock: {e}"))?;
+            .map_err(|_| StreamError::CancelLockPoisoned)?;
         let Some(child) = guard.as_mut() else {
             // Already exited.
             return Ok(());
@@ -127,6 +133,29 @@ impl ProcessHandle {
 /// reader, exit watcher); the `Clone` bound lets us hand a copy to each.
 /// `run_id` is opaque — the caller chooses it and uses it to correlate
 /// events with the handle.
+///
+/// ```no_run
+/// use cli_stream::{spawn_streaming, ProcessEvent};
+/// use std::path::PathBuf;
+///
+/// # fn main() -> Result<(), cli_stream::StreamError> {
+/// let handle = spawn_streaming(
+///     PathBuf::from("echo"),
+///     vec!["hello".to_owned()],
+///     Vec::new(),                      // extra env vars (key, value)
+///     std::env::current_dir().unwrap(),
+///     "run-1".to_owned(),              // your correlation id
+///     |event| match event {
+///         ProcessEvent::Stdout { line, .. } => println!("{line}"),
+///         ProcessEvent::Exited { exit_code, .. } => eprintln!("exit {exit_code:?}"),
+///         _ => {}
+///     },
+/// )?;
+/// // `handle.cancel()` stops it early; dropping the handle does not.
+/// let _ = handle;
+/// # Ok(())
+/// # }
+/// ```
 pub fn spawn_streaming<F>(
     program: PathBuf,
     args: Vec<String>,
@@ -134,7 +163,7 @@ pub fn spawn_streaming<F>(
     cwd: PathBuf,
     run_id: String,
     callback: F,
-) -> Result<ProcessHandle, String>
+) -> Result<ProcessHandle, StreamError>
 where
     F: FnMut(ProcessEvent) + Send + Sync + Clone + 'static,
 {
@@ -160,12 +189,19 @@ where
     for (key, value) in &env {
         command.env(key, value);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("failed to spawn {}: {e}", program.display()))?;
+    let mut child = command.spawn().map_err(|source| StreamError::Spawn {
+        program: program.display().to_string(),
+        source,
+    })?;
 
-    let stdout = child.stdout.take().ok_or("child stdout was not captured")?;
-    let stderr = child.stderr.take().ok_or("child stderr was not captured")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(StreamError::PipeNotCaptured { stream: "stdout" })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or(StreamError::PipeNotCaptured { stream: "stderr" })?;
 
     let inner = Arc::new(HandleInner {
         child: Mutex::new(Some(child)),
@@ -622,6 +658,30 @@ mod lifecycle {
     }
 
     #[test]
+    fn env_vars_are_passed_to_the_child() {
+        // The `env` argument must reach the child's environment — exercise it
+        // directly (the other lifecycle tests pass an empty env).
+        let (cb, events, done) = collector();
+        let _handle = spawn_streaming(
+            PathBuf::from("sh"),
+            vec!["-c".to_owned(), "printf '%s\\n' \"$CLI_STREAM_STUB\"".to_owned()],
+            vec![("CLI_STREAM_STUB".to_owned(), "from-env".to_owned())],
+            PathBuf::from("."),
+            "t".to_owned(),
+            cb,
+        )
+        .expect("spawn");
+        wait_done(&done, 10);
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProcessEvent::Stdout { line, .. } if line == "from-env")),
+            "child should observe the injected env var, got {events:?}"
+        );
+    }
+
+    #[test]
     fn stderr_is_streamed_and_not_misrouted_to_stdout() {
         let events = run("sh", &["-c", "echo to-stderr 1>&2"]);
         assert!(events
@@ -676,6 +736,16 @@ mod lifecycle {
             "t".to_owned(),
             |_ev: ProcessEvent| {},
         );
-        assert!(result.is_err(), "spawning a missing binary must Err");
+        // Typed: a `Spawn` error carrying the OS `NotFound` io::Error as its
+        // source — the whole point of `StreamError` over a `String`. A caller
+        // can branch on `ErrorKind` to tell "not installed" (NotFound) from
+        // "permission denied", which a flattened string can't support.
+        match result {
+            Err(StreamError::Spawn { program, source }) => {
+                assert!(program.contains("cli-stream-no-such-binary-zzz"));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected StreamError::Spawn, got {other:?}"),
+        }
     }
 }

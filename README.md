@@ -68,32 +68,29 @@ if !r.auth_configured { h.login(log)?; }               // `claude auth login` (o
 Give it a prompt and stream the answer — same code whichever CLI runs underneath:
 
 ```rust
-use std::sync::{mpsc::sync_channel, Arc};
-use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
+use harness::{Claude, Harness, HarnessError, RunEvent, RunMode, RunRequest, RunTuning};
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), HarnessError> {
     // Pick a harness. `Claude` drives the `claude` CLI (must be installed +
     // signed in). Swap for `harness::Bob::new()` or `harness::Codex::new()`.
     let claude = Claude::new();
 
-    // `run()` returns immediately; events arrive on background threads, so
-    // collect them over a channel. (The callback must be Send + Sync — a
-    // `sync_channel` sender is.)
-    let (tx, rx) = sync_channel::<RunEvent>(256);
-    let on_event: harness::RunCallback = Arc::new(move |ev| { let _ = tx.send(ev); });
+    // `run_channel()` starts the run and hands back its events on a channel —
+    // no callback/`Sender` plumbing to hand-write. It returns immediately;
+    // events arrive on background threads. (`run()` is still there when you
+    // want push semantics — forwarding straight onto a Tauri Channel / SSE
+    // sink from inside a callback.)
+    let (_handle, rx) = claude.run_channel(RunRequest {
+        run_id: "demo".into(),
+        prompt: "In one sentence, what is a Markdown heading?".into(),
+        cwd: None,                     // working dir for the agent's tool calls
+        mode: RunMode::Ask,            // Ask = answer only; Edit = may edit files
+        tuning: RunTuning::default(),  // optional: model / effort / max_turns
+    })?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
 
-    let _handle = claude.run(
-        RunRequest {
-            run_id: "demo".into(),
-            prompt: "In one sentence, what is a Markdown heading?".into(),
-            cwd: None,                     // working dir for the agent's tool calls
-            mode: RunMode::Ask,            // Ask = answer only; Edit = may edit files
-            tuning: RunTuning::default(),  // optional: model / effort / max_turns
-        },
-        on_event,
-    )?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
-
-    // ONE normalized event stream, regardless of the backing CLI:
+    // ONE normalized event stream, regardless of the backing CLI. `rx` hangs
+    // up on its own when the run ends, so this loop finishes without the
+    // handle:
     for ev in rx {
         match ev {
             RunEvent::Text { delta, .. }     => print!("{delta}"),        // the answer
@@ -107,6 +104,11 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 ```
+
+`install` / `run` / `login` / `cancel` return `Result<_, HarnessError>` — a
+typed error you can `match` on (`Spawn` / `Install` / `Login` / `Cancel` /
+`Other`) to react to the *kind* of failure, or just stringify at your boundary
+(`.map_err(|e| e.to_string())`, e.g. inside a Tauri command).
 
 Prefer to pick a harness by string id (e.g. from a config field)? Use the registry:
 
@@ -152,7 +154,7 @@ struct ClaudeWithDefaults { inner: harness::Claude }
 
 impl Harness for ClaudeWithDefaults {
     fn info(&self) -> HarnessInfo { /* tweak the model list, etc. */ }
-    fn run(&self, req: RunRequest, cb: RunCallback) -> Result<RunHandle, String> {
+    fn run(&self, req: RunRequest, cb: RunCallback) -> Result<RunHandle, HarnessError> {
         self.inner.run(req, cb)            // reuse Claude's spawn + parser
     }
     // readiness / install / credential / login → forward to self.inner

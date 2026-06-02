@@ -2,6 +2,7 @@
 name = "cli-stream"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.74"
 description = "Generic streaming subprocess engine: spawn a CLI, stream its stdout/stderr lines, cancel it (SIGTERM→SIGKILL), with PATH augmentation so packaged apps find node/CLIs."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -17,6 +18,10 @@ categories = ["command-line-utilities", "os"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# Typed errors (StreamError) with a real `std::io::Error` source — derive
+# Display + the Error source chain without hand-writing the impls. Build-time
+# proc-macro only; no runtime weight added to the leaf.
+thiserror = "2"
 
 # `ProcessHandle::cancel()` sends SIGTERM on unix (SIGKILL fallback);
 # Windows uses `Child::kill()` (TerminateProcess).

@@ -12,6 +12,7 @@
 //! their own runtime (axum's `tokio::sync::mpsc`, Tauri's
 //! `Channel`) wrap with a sender inside the closure.
 
+use crate::error::BobError;
 use cli_stream::InstallEvent;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -35,25 +36,39 @@ const INSTALL_SCRIPT: &str = include_str!("../scripts/install-bob.sh");
 /// failure, spawn failure). Once `bash` is running, all failures
 /// surface through the `Done { ok: false }` event instead — that's
 /// how the script's own errors get back to the user.
-pub fn install_bob<F>(mut callback: F) -> Result<(), String>
+pub fn install_bob<F>(mut callback: F) -> Result<(), BobError>
 where
     F: FnMut(InstallEvent) + Send + Sync + 'static + Clone,
 {
     // 1. Spool the embedded script to a tempfile. Using a file
     //    rather than piping into bash's stdin means error
     //    messages reference a stable path on disk.
-    let mut tmp = NamedTempFile::new().map_err(|e| format!("tempfile: {e}"))?;
+    let mut tmp = NamedTempFile::new().map_err(|source| BobError::Io {
+        context: "create install tempfile",
+        source,
+    })?;
     tmp.write_all(INSTALL_SCRIPT.as_bytes())
-        .map_err(|e| format!("write tempfile: {e}"))?;
+        .map_err(|source| BobError::Io {
+            context: "write install tempfile",
+            source,
+        })?;
 
     // 2. Make the script executable. bash -l <path> would work
     //    even without +x because we pass the path as an argument,
     //    but tooling that introspects /proc tends to expect the
     //    executable bit.
-    let metadata = tmp.as_file().metadata().map_err(|e| e.to_string())?;
+    let metadata = tmp.as_file().metadata().map_err(|source| BobError::Io {
+        context: "stat install tempfile",
+        source,
+    })?;
     let mut perms = metadata.permissions();
     perms.set_mode(0o755);
-    tmp.as_file().set_permissions(perms).map_err(|e| e.to_string())?;
+    tmp.as_file()
+        .set_permissions(perms)
+        .map_err(|source| BobError::Io {
+            context: "chmod install tempfile",
+            source,
+        })?;
 
     // 3. Spawn under `bash -l` so nvm / brew / asdf init in the
     //    user profile is loaded. The script also `source`s
@@ -65,10 +80,19 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("spawn install: {e}"))?;
+        .map_err(|source| BobError::Io {
+            context: "spawn install script",
+            source,
+        })?;
 
-    let stdout = child.stdout.take().ok_or("missing stdout pipe")?;
-    let stderr = child.stderr.take().ok_or("missing stderr pipe")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(BobError::PipeNotCaptured { stream: "stdout" })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or(BobError::PipeNotCaptured { stream: "stderr" })?;
 
     // 4. Two reader threads. Each owns its own clone of the
     //    callback because closures aren't shareable across threads
@@ -98,7 +122,10 @@ where
     });
 
     // 5. Wait for the child + drain reader threads + emit done.
-    let status = child.wait().map_err(|e| format!("wait install: {e}"))?;
+    let status = child.wait().map_err(|source| BobError::Io {
+        context: "wait on install script",
+        source,
+    })?;
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
     callback(InstallEvent::Done {

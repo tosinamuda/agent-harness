@@ -109,7 +109,7 @@ impl Harness for EchoHarness {
                 }
             },
         )
-        .map_err(HarnessError::Spawn)?;
+        .map_err(HarnessError::spawn)?;
         Ok(Box::new(handle))
     }
 }
@@ -141,6 +141,8 @@ impl EchoParser {
             ProcessEvent::Stdout { run_id, line } => {
                 run_events_from_parsed(&run_id, self.parse_line(&line))
             }
+            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
+            _ => Vec::new(),
         }
     }
 

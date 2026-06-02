@@ -80,9 +80,9 @@ impl Harness for BobHarness {
     fn install(&self, on_event: InstallCallback) -> Result<(), HarnessError> {
         // The closure captures only the `Arc` (Clone + Send + Sync +
         // 'static), so it satisfies `install_bob`'s `F: FnMut + Send
-        // + Sync + Clone + 'static` bound. bob-rs reports failures as a
-        // String; lift it into the typed install error.
-        install_bob(move |event| (*on_event)(event)).map_err(HarnessError::Install)
+        // + Sync + Clone + 'static` bound. bob-rs reports failures as a typed
+        // `BobError`; carry it as the install error's source.
+        install_bob(move |event| (*on_event)(event)).map_err(HarnessError::install)
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
@@ -119,7 +119,7 @@ impl Harness for BobHarness {
                 (*on_event)(normalized);
             }
         })
-        .map_err(HarnessError::Spawn)?;
+        .map_err(HarnessError::spawn)?;
         Ok(Box::new(handle))
     }
 

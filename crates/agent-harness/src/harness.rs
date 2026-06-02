@@ -21,7 +21,7 @@
 //!   one shape regardless of which harness produced it.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,31 +41,89 @@ pub type InstallCallback = Arc<dyn Fn(InstallEvent) + Send + Sync>;
 
 // --- Errors ---------------------------------------------------------
 
+/// A boxed, type-erased error source. The [`HarnessError`] variants carry one
+/// of these instead of `#[from]`-ing a single concrete type, because each
+/// *category* can be produced by more than one underlying error: a `Spawn`
+/// failure is a [`cli_stream::StreamError`] for the claude/codex adapters but a
+/// `bob_rs::BobError` for bob. The real error stays reachable through
+/// [`std::error::Error::source`] (and `downcast_ref`); the category is the
+/// variant.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 /// Why a [`Harness`] operation failed. Returned by `install` / `run` /
 /// `login` / [`RunControl::cancel`] so a consumer can branch on the *kind* of
 /// failure — offer install vs sign-in vs surface the message — instead of
-/// string-matching. `#[non_exhaustive]` so adding a variant later (e.g. a
-/// typed spawn source) isn't a breaking change.
+/// string-matching.
+///
+/// Each category carries the real underlying error as a [`source`] (via the
+/// [`BoxError`] field), so a consumer that wants more than the category can
+/// walk `.source()` or `downcast_ref::<cli_stream::StreamError>()` /
+/// `::<bob_rs::BobError>()`. The `Display` still flattens the source into the
+/// message (`"failed to start the agent: <source>"`), so a consumer that just
+/// stringifies at a boundary (e.g. a Tauri command's `.to_string()`) gets the
+/// same full message as before. `#[non_exhaustive]` so adding a variant later
+/// isn't a breaking change.
+///
+/// ```
+/// use harness::{HarnessError, StreamError};
+/// use std::error::Error;
+///
+/// // Box any typed source under a category constructor:
+/// let err = HarnessError::spawn(StreamError::PipeNotCaptured { stream: "stdout" });
+///
+/// // Stringifying at a boundary flattens the source into the message
+/// // (so a Tauri command's `.to_string()` keeps its full text)…
+/// assert!(err.to_string().starts_with("failed to start the agent: "));
+///
+/// // …while the real typed cause stays reachable for a consumer that wants
+/// // to branch on it rather than parse a string.
+/// let source = err.source().expect("Spawn carries a source");
+/// assert!(source.downcast_ref::<StreamError>().is_some());
+/// ```
+///
+/// [`source`]: std::error::Error::source
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum HarnessError {
     /// The harness's CLI couldn't be started — not installed, not on `PATH`,
     /// or an OS-level spawn failure.
     #[error("failed to start the agent: {0}")]
-    Spawn(String),
+    Spawn(#[source] BoxError),
     /// A one-time install step failed.
     #[error("install failed: {0}")]
-    Install(String),
+    Install(#[source] BoxError),
     /// Interactive sign-in failed.
     #[error("sign-in failed: {0}")]
-    Login(String),
+    Login(#[source] BoxError),
     /// Cancelling an in-flight run failed.
     #[error("cancel failed: {0}")]
-    Cancel(String),
+    Cancel(#[source] BoxError),
     /// Any other adapter/runtime failure (e.g. a backend SDK error that
-    /// doesn't map onto the cases above).
+    /// doesn't map onto the cases above). Carries a message rather than a
+    /// source — it's the catch-all when there's nothing typed to preserve.
     #[error("{0}")]
     Other(String),
+}
+
+impl HarnessError {
+    /// Categorize a source error as a [`Spawn`](HarnessError::Spawn) failure.
+    /// Accepts anything boxable — a typed `StreamError`/`BobError`, or a
+    /// `String`/`&str` for adapters with nothing typed to carry.
+    pub fn spawn(source: impl Into<BoxError>) -> Self {
+        Self::Spawn(source.into())
+    }
+    /// Categorize a source error as an [`Install`](HarnessError::Install) failure.
+    pub fn install(source: impl Into<BoxError>) -> Self {
+        Self::Install(source.into())
+    }
+    /// Categorize a source error as a [`Login`](HarnessError::Login) failure.
+    pub fn login(source: impl Into<BoxError>) -> Self {
+        Self::Login(source.into())
+    }
+    /// Categorize a source error as a [`Cancel`](HarnessError::Cancel) failure.
+    pub fn cancel(source: impl Into<BoxError>) -> Self {
+        Self::Cancel(source.into())
+    }
 }
 
 // --- Run control (cancellation) -------------------------------------
@@ -89,7 +147,7 @@ pub type RunHandle = Box<dyn RunControl>;
 // (orphan rule) rather than in any adapter crate.
 impl RunControl for ProcessHandle {
     fn cancel(&self) -> Result<(), HarnessError> {
-        ProcessHandle::cancel(self).map_err(HarnessError::Cancel)
+        ProcessHandle::cancel(self).map_err(HarnessError::cancel)
     }
     fn was_cancelled(&self) -> bool {
         ProcessHandle::was_cancelled(self)
@@ -292,9 +350,70 @@ pub trait Harness: Send + Sync {
     /// `Done { ok }` reports success. Default: unsupported — harnesses
     /// that Compose authenticates itself (bob, via its API key) keep it.
     fn login(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
-        Err(HarnessError::Login(
-            "This harness does not support interactive sign-in.".to_owned(),
+        Err(HarnessError::login(
+            "This harness does not support interactive sign-in.",
         ))
+    }
+
+    /// Convenience over [`run`](Harness::run) for callers that want to
+    /// *pull* events off a channel instead of supplying a push callback.
+    /// Forwards each [`RunEvent`] into an `mpsc` channel and hands the
+    /// receiver back alongside the run handle, so the caller can simply
+    /// `for event in rx { … }` rather than re-write the
+    /// `Arc::new(move |ev| tx.send(ev))` plumbing at every call site.
+    ///
+    /// The receiver hangs up when the run ends — and on its own, without
+    /// the caller dropping the [`RunHandle`] first. The forwarding callback
+    /// (and the `Sender` it owns) lives only on the engine's reader
+    /// threads; once the process exits and those threads finish, every
+    /// clone of the callback drops, the `Sender` drops, and the `for` loop
+    /// over `rx` terminates. (Dropping the handle never cancels a run — see
+    /// [`RunControl`] — so it is safe to drain `rx` to completion while
+    /// still holding the handle for a possible [`cancel`](RunControl::cancel).)
+    ///
+    /// Prefer [`run`](Harness::run) directly when you need push semantics —
+    /// e.g. forwarding straight onto a Tauri `Channel` or an SSE sink from
+    /// inside the callback — where an intermediate channel is just an extra
+    /// hop. This is a provided method (not overridable surface): adapters
+    /// implement only `run`, and every harness — built-in or third-party —
+    /// gets `run_channel` for free.
+    ///
+    /// ```no_run
+    /// use harness::{Claude, Harness, RunEvent, RunMode, RunRequest, RunTuning};
+    ///
+    /// # fn main() -> Result<(), harness::HarnessError> {
+    /// let (_handle, rx) = Claude::new().run_channel(RunRequest {
+    ///     run_id: "demo".into(),
+    ///     prompt: "Explain Markdown headings in one sentence.".into(),
+    ///     cwd: None,
+    ///     mode: RunMode::Ask,
+    ///     tuning: RunTuning::default(),
+    /// })?;
+    /// for event in rx {
+    ///     match event {
+    ///         RunEvent::Text { delta, .. } => print!("{delta}"),
+    ///         RunEvent::Exited { .. } => break,
+    ///         _ => {}
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn run_channel(
+        &self,
+        request: RunRequest,
+    ) -> Result<(RunHandle, mpsc::Receiver<RunEvent>), HarnessError> {
+        let (tx, rx) = mpsc::channel();
+        let handle = self.run(
+            request,
+            Arc::new(move |event| {
+                // A hung-up receiver (consumer stopped early) is not an
+                // error: the run keeps streaming; we just drop the event
+                // nobody is waiting for.
+                let _ = tx.send(event);
+            }),
+        )?;
+        Ok((handle, rx))
     }
 }
 
@@ -349,9 +468,11 @@ pub fn run_login_command(
                 *lock.lock().unwrap_or_else(|p| p.into_inner()) = true;
                 cvar.notify_all();
             }
+            // `ProcessEvent` is #[non_exhaustive]; ignore any future variant.
+            _ => {}
         },
     )
-    .map_err(HarnessError::Login)?;
+    .map_err(HarnessError::login)?;
     let (lock, cvar) = &*done;
     let mut finished = lock.lock().unwrap_or_else(|p| p.into_inner());
     while !*finished {
@@ -366,6 +487,11 @@ pub fn run_login_command(
 /// reports authenticated, not only the CLI's own interactive OAuth login —
 /// which can't complete where there's no browser. Pure (the env read stays at
 /// the call site) so it's unit-tested directly.
+///
+/// Only the claude/codex adapters OR this into readiness — bob reports auth via
+/// `bob-rs`'s own keychain source — so it's gated to those features. Without
+/// them (`--no-default-features`) it would be dead code, hence the `cfg`.
+#[cfg(any(feature = "claude", feature = "codex"))]
 pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
     matches!(value, Some(v) if !v.trim().is_empty())
 }
@@ -374,11 +500,138 @@ pub(crate) fn api_key_value_usable(value: Option<String>) -> bool {
 mod tests {
     use super::*;
 
+    // Gated like the fn it tests — `api_key_value_usable` only exists when a
+    // claude/codex adapter is compiled in.
+    #[cfg(any(feature = "claude", feature = "codex"))]
     #[test]
     fn api_key_value_usable_requires_a_nonblank_value() {
         assert!(api_key_value_usable(Some("sk-abc".to_owned())));
         assert!(!api_key_value_usable(Some(String::new())));
         assert!(!api_key_value_usable(Some("   ".to_owned())));
         assert!(!api_key_value_usable(None));
+    }
+
+    /// A no-op [`RunControl`] so the mock harness below can hand back a
+    /// [`RunHandle`] without a real process behind it.
+    struct NoopControl;
+    impl RunControl for NoopControl {
+        fn cancel(&self) -> Result<(), HarnessError> {
+            Ok(())
+        }
+        fn was_cancelled(&self) -> bool {
+            false
+        }
+    }
+
+    /// A minimal in-memory harness whose `run()` pushes a fixed event
+    /// sequence straight to the callback, synchronously, then returns —
+    /// dropping its only `RunCallback` clone. That's exactly the ownership
+    /// shape `run_channel` relies on, with no subprocess to spawn, so it
+    /// pins down the contract: events are forwarded, and the receiver hangs
+    /// up on its own once the run's callback ownership ends.
+    struct MockHarness {
+        events: Vec<RunEvent>,
+    }
+    impl Harness for MockHarness {
+        fn info(&self) -> HarnessInfo {
+            unreachable!("not exercised by run_channel")
+        }
+        fn readiness(&self) -> HarnessReadiness {
+            unreachable!("not exercised by run_channel")
+        }
+        fn install(&self, _on_event: InstallCallback) -> Result<(), HarnessError> {
+            Ok(())
+        }
+        fn run(
+            &self,
+            _request: RunRequest,
+            on_event: RunCallback,
+        ) -> Result<RunHandle, HarnessError> {
+            for event in &self.events {
+                on_event(event.clone());
+            }
+            // `on_event` (the lone RunCallback clone, owning the channel's
+            // Sender) drops as this returns → the receiver closes.
+            Ok(Box::new(NoopControl))
+        }
+        fn credential(&self) -> CredentialSpec {
+            unreachable!("not exercised by run_channel")
+        }
+    }
+
+    fn demo_request() -> RunRequest {
+        RunRequest {
+            run_id: "t".to_owned(),
+            prompt: "hi".to_owned(),
+            cwd: None,
+            mode: RunMode::Ask,
+            tuning: RunTuning::default(),
+        }
+    }
+
+    #[test]
+    fn run_channel_forwards_every_event_then_closes() {
+        let harness = MockHarness {
+            events: vec![
+                RunEvent::Text {
+                    run_id: "t".to_owned(),
+                    delta: "hello".to_owned(),
+                },
+                RunEvent::Exited {
+                    run_id: "t".to_owned(),
+                    exit_code: Some(0),
+                    cancelled: false,
+                },
+            ],
+        };
+        let (_handle, rx) = harness.run_channel(demo_request()).expect("run_channel ok");
+        // Draining to completion *terminates* — proof the channel closed
+        // without us dropping the handle.
+        let collected: Vec<RunEvent> = rx.into_iter().collect();
+        assert_eq!(
+            collected,
+            vec![
+                RunEvent::Text {
+                    run_id: "t".to_owned(),
+                    delta: "hello".to_owned(),
+                },
+                RunEvent::Exited {
+                    run_id: "t".to_owned(),
+                    exit_code: Some(0),
+                    cancelled: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn run_channel_receiver_closes_even_with_no_events() {
+        let harness = MockHarness { events: Vec::new() };
+        let (_handle, rx) = harness.run_channel(demo_request()).expect("run_channel ok");
+        assert_eq!(rx.into_iter().count(), 0); // closes immediately, doesn't hang
+    }
+
+    #[test]
+    fn harness_error_preserves_typed_source_and_flattened_message() {
+        use std::error::Error;
+
+        // Categorize a real typed engine error as a Spawn failure.
+        let err = HarnessError::spawn(cli_stream::StreamError::PipeNotCaptured { stream: "stdout" });
+
+        // Display still flattens the source into the message, so a consumer
+        // that just `.to_string()`s at a boundary (a Tauri command) gets the
+        // category prefix *and* the full underlying detail — unchanged from
+        // when the variant held a String.
+        let message = err.to_string();
+        assert!(message.starts_with("failed to start the agent: "), "got {message:?}");
+        assert!(message.contains("stdout pipe was not captured"), "got {message:?}");
+
+        // And the real typed error is reachable via the source chain — the
+        // whole point of carrying a source instead of a flattened string.
+        let source = err.source().expect("HarnessError::Spawn has a source");
+        assert!(
+            source.downcast_ref::<cli_stream::StreamError>().is_some(),
+            "source should downcast back to the typed StreamError"
+        );
     }
 }
