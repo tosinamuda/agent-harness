@@ -26,7 +26,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/tosinamuda/agent-harness"
+repository = "https://github.com/getlatentic/agent-harness"
 
 # Dependencies declared once, referenced with `<dep>.workspace = true` per
 # crate. The internal crates carry their published `version` here too, so the
