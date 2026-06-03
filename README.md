@@ -32,9 +32,7 @@ The dependency arrow points up: `cli-stream` ← `bob-rs` ← `agent-harness`
 
 ```toml
 [dependencies]
-# Not yet on crates.io — track the repo directly for now:
-agent-harness = { git = "https://github.com/getlatentic/agent-harness" }
-# (the library is imported as `harness`)
+agent-harness = "0.1"   # the library is imported as `harness`
 ```
 
 ### 2. Install & sign in the CLI you'll drive
