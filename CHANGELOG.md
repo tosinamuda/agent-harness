@@ -7,6 +7,8 @@ crates.io yet, so everything lives under **Unreleased** until the first release.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-03
+
 ### Added
 - **Typed errors, end to end.** Every crate's public API now returns a typed
   error carrying the real underlying source, not a flattened `String`:
