@@ -1,9 +1,9 @@
 # Changelog
 
 Notable changes to this workspace — `cli-stream`, `bob-rs`, `agent-harness` —
-recorded together (they're versioned in lockstep at `0.1.0`). Format loosely
-follows [Keep a Changelog](https://keepachangelog.com). Nothing is published to
-crates.io yet, so everything lives under **Unreleased** until the first release.
+recorded together (they're versioned in lockstep). Format loosely follows
+[Keep a Changelog](https://keepachangelog.com). All three are on crates.io;
+unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
