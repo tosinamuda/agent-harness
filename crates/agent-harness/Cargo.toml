@@ -1,12 +1,12 @@
 [package]
 name = "agent-harness"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.74"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Use existing agent CLIs (Claude Code, Codex, bob) programmatically from Rust — or add your own — behind one Harness trait + a normalized run-event stream. Imported as `harness`."
-license = "MIT OR Apache-2.0"
+license.workspace = true
 readme = "README.md"
-repository = "https://github.com/tosinamuda/agent-harness"
+repository.workspace = true
 keywords = ["agent", "llm", "harness", "cli", "subprocess"]
 categories = ["command-line-utilities", "api-bindings"]
 
@@ -32,12 +32,22 @@ codex = []
 # The generic subprocess engine (spawn / cancel / PATH augmentation) + the
 # ProcessEvent / InstallEvent shapes. Re-exported so adapters + consumers
 # reach the engine through this framework crate.
-cli-stream = { path = "../cli-stream", version = "0.1.0" }
+cli-stream.workspace = true
 # The unofficial bob SDK — wrapped by the `bob` adapter module, so it's
 # optional + gated behind the `bob` feature.
-bob-rs = { path = "../bob-rs", version = "0.1.0", optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+bob-rs = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
 # Typed errors for the public API (HarnessError) — derive Display + the
 # std::error::Error source chain without hand-writing impls.
-thiserror = "2"
+thiserror.workspace = true
+
+# cargo-release stamps the single shared workspace CHANGELOG here — on the last
+# crate of the lockstep release — so the version header is inserted exactly
+# once (a workspace-wide replacement would run per crate and duplicate it). The
+# path is relative to this manifest; the CHANGELOG lives at the workspace root.
+[package.metadata.release]
+pre-release-replacements = [
+  { file = "../../CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+]
+

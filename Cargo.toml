@@ -16,3 +16,25 @@
 [workspace]
 resolver = "2"
 members = ["crates/cli-stream", "crates/bob-rs", "crates/agent-harness"]
+
+# Single source of truth for the version + shared publish metadata. The three
+# crates release in lockstep, so the version lives here once and each crate
+# inherits it with `version.workspace = true`. A bump (e.g. `cargo release`)
+# edits this one line instead of three drifting manifests.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/getlatentic/agent-harness"
+
+# Dependencies declared once, referenced with `<dep>.workspace = true` per
+# crate. The internal crates carry their published `version` here too, so the
+# dependency requirement bumps in lockstep with the version above — never by
+# hand-editing each consumer.
+[workspace.dependencies]
+cli-stream = { path = "crates/cli-stream", version = "0.1.0" }
+bob-rs = { path = "crates/bob-rs", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

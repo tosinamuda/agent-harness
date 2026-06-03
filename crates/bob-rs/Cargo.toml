@@ -1,12 +1,12 @@
 [package]
 name = "bob-rs"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.74"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Unofficial Rust SDK for the bob agent CLI — detection, install, keychain, run. Not affiliated with or endorsed by the bob maintainers."
-license = "MIT OR Apache-2.0"
+license.workspace = true
 readme = "README.md"
-repository = "https://github.com/tosinamuda/agent-harness"
+repository.workspace = true
 keywords = ["bob", "agent", "cli", "sdk", "keychain"]
 categories = ["command-line-utilities"]
 
@@ -21,12 +21,12 @@ categories = ["command-line-utilities"]
 # The generic subprocess engine + event shapes bob-rs builds its
 # bob-specific spawn/install on top of. Depending on this leaf (not the
 # harness framework) is what keeps bob-rs a standalone SDK.
-cli-stream = { path = "../cli-stream", version = "0.1.0" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+cli-stream.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 # Typed errors (BobError) carrying real io::Error / keyring::Error /
 # serde_json::Error / cli_stream::StreamError sources. Build-time proc-macro.
-thiserror = "2"
+thiserror.workspace = true
 # Tempfile is needed to spool the embedded `install-bob.sh` to
 # disk before exec'ing it. The script ships as a string constant
 # (`include_str!`) so the consumer doesn't need to ship a separate

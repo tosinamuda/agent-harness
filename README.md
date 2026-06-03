@@ -33,7 +33,7 @@ The dependency arrow points up: `cli-stream` ← `bob-rs` ← `agent-harness`
 ```toml
 [dependencies]
 # Not yet on crates.io — track the repo directly for now:
-agent-harness = { git = "https://github.com/tosinamuda/agent-harness" }
+agent-harness = { git = "https://github.com/getlatentic/agent-harness" }
 # (the library is imported as `harness`)
 ```
 

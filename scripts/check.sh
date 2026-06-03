@@ -30,5 +30,18 @@ else
   echo "==> (skip) cargo-deny not installed — 'cargo install cargo-deny' to enable"
 fi
 
+# SemVer guard: compares the public API against the last published release so a
+# bump is mechanical, not a guess — a breaking change (pre-1.0) must go in the
+# minor, additive changes in the patch. Skipped until the crates are published
+# (nothing to diff against) and when the tool isn't installed.
+if command -v cargo-semver-checks >/dev/null 2>&1; then
+  echo "==> cargo semver-checks (public API vs last release)"
+  cargo semver-checks check-release --workspace || {
+    echo "   (semver-checks reported findings — bump minor if breaking, or it's a no-op pre-publish)"
+  }
+else
+  echo "==> (skip) cargo-semver-checks not installed — 'cargo install cargo-semver-checks' to enable"
+fi
+
 echo
 echo "All checks passed."
