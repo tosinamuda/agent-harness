@@ -7,6 +7,34 @@ unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-09
+
+### Fixed
+- **In-band harness failures now surface as `RunEvent::Error`.** `ParsedLine`
+  gained an `error` field, and `run_events_from_parsed` — the single place a
+  parsed stdout line becomes a `RunEvent` — emits `RunEvent::Error` when it's
+  set. So a failure a harness reports *in its stdout stream* (not just a
+  spawn/IO `ProcessEvent::Error`) now reaches the consumer. The codex adapter
+  maps `codex exec --json`'s `turn.failed { error: { message } }` and
+  `error { message }` lines to it: previously `turn.failed` was ignored outright
+  and `error` was downgraded to a transient activity line, so a codex turn that
+  failed mid-run (quota, context overflow, model error) produced no answer *and*
+  no error — looking like the agent silently did nothing. Additive: parsers that
+  don't set `error` are unaffected.
+
+## [0.2.0] - 2026-06-09
+
+### Added
+- **Neutral `ToolKind` on `RunEvent::ToolStart`.** A cross-harness behaviour
+  class (`Read` / `Write` / `Edit` / `Search` / `Execute` / `Other`) rides
+  alongside the raw tool `name`, classified once per adapter where the wire
+  format is already parsed, so a consumer can route by what a tool call *does*
+  (a read → a context pill, an edit → a file-op card) without re-encoding each
+  harness's native tool vocabulary (bob's `read_file`, Claude's `Read`, codex's
+  `file_change`). The neutral class rides as `toolKind` on the wire — distinct
+  from the `kind` event discriminator. Additive: the raw `name` / `tool_call_id`
+  are unchanged, so a consumer that only reads those is unaffected.
+
 ## [0.1.0] - 2026-06-03
 
 ### Added
