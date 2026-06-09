@@ -18,7 +18,8 @@ use serde_json::{Map, Value};
 
 use crate::events::run_events_from_parsed;
 use crate::{
-    ParsedLine, ProcessEvent, RunEvent, SessionInfo, ToolCallEnd, ToolCallStart, UsageInfo,
+    ParsedLine, ProcessEvent, RunEvent, SessionInfo, ToolCallEnd, ToolCallStart, ToolKind,
+    UsageInfo,
 };
 
 /// A stable tool *identifier* for a codex item — the card's `name`, which the
@@ -34,6 +35,18 @@ fn codex_tool_kind(item: &Map<String, Value>) -> Option<&'static str> {
         "web_search" => Some("web_search"),
         "mcp_tool_call" => Some("mcp_tool_call"),
         _ => None,
+    }
+}
+
+/// The neutral [`ToolKind`] for a codex tool identifier (the `name` produced
+/// by [`codex_tool_kind`]): codex edits files via `file_change`, runs shells
+/// via `command_execution`, searches via `web_search`.
+fn codex_tool_kind_class(identifier: &str) -> ToolKind {
+    match identifier {
+        "file_change" => ToolKind::Edit,
+        "command_execution" => ToolKind::Execute,
+        "web_search" => ToolKind::Search,
+        _ => ToolKind::Other, // mcp_tool_call + any future identifier
     }
 }
 
@@ -289,6 +302,7 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
                                 tool_call_id: id.clone(),
                                 name: kind.to_owned(),
                                 input: codex_tool_input(item),
+                                tool_kind: codex_tool_kind_class(kind),
                             }),
                             tool_end: Some(ToolCallEnd {
                                 tool_call_id: id,
@@ -321,6 +335,7 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
                             tool_call_id: id.to_owned(),
                             name: kind.to_owned(),
                             input: codex_tool_input(item),
+                            tool_kind: codex_tool_kind_class(kind),
                         }),
                         ..ParsedLine::default()
                     },

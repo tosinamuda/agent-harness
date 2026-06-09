@@ -27,7 +27,7 @@ pub mod raw;
 
 pub use events::{
     normalize_process_event, run_events_from_parsed, ByteRange, ParsedLine, RunEvent, SessionInfo,
-    SuggestedEdit, ToolCallEnd, ToolCallStart, UsageInfo,
+    SuggestedEdit, ToolCallEnd, ToolCallStart, ToolKind, UsageInfo,
 };
 pub use raw::parse_raw_line;
 pub use harness::{
@@ -55,7 +55,7 @@ pub mod registry;
 // The built-in adapters, re-exported as short names so consumers write
 // `use harness::{Bob, Claude, Codex}` — each gated behind its feature.
 #[cfg(feature = "bob")]
-pub use bob::{normalize_bob_event, BobHarness as Bob, BOB_HARNESS_ID};
+pub use bob::{bob_tool_kind, normalize_bob_event, BobHarness as Bob, BOB_HARNESS_ID};
 // bob's typed error, re-exported so a consumer can `downcast_ref` a bob
 // `HarnessError`'s source (install / keychain / spawn) back to `BobError`.
 #[cfg(feature = "bob")]
