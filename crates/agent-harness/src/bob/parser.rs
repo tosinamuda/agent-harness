@@ -12,8 +12,23 @@ use serde_json::Value;
 
 use crate::{
     normalize_process_event, ByteRange, ParsedLine, ProcessEvent, RunEvent, SessionInfo,
-    SuggestedEdit, ToolCallEnd, ToolCallStart, UsageInfo,
+    SuggestedEdit, ToolCallEnd, ToolCallStart, ToolKind, UsageInfo,
 };
+
+/// Classify a bob (Roo-style) tool name into the neutral [`ToolKind`].
+/// Public so a consumer that interprets bob's *raw* events directly — rather
+/// than through `RunEvent` — can share this one table instead of re-encoding
+/// bob's vocabulary downstream.
+pub fn bob_tool_kind(name: &str) -> ToolKind {
+    match name {
+        "read_file" => ToolKind::Read,
+        "write_file" | "write_to_file" => ToolKind::Write,
+        "apply_diff" | "insert_content" | "search_and_replace" => ToolKind::Edit,
+        "search_files" | "list_files" | "list_code_definition_names" => ToolKind::Search,
+        "execute_command" => ToolKind::Execute,
+        _ => ToolKind::Other,
+    }
+}
 
 /// bob's adapter-side normalization: parse bob's `--output-format
 /// stream-json` stdout via [`parse_bob_line`].
@@ -100,8 +115,9 @@ pub fn parse_bob_line(line: &str) -> ParsedLine {
             // The call's arguments, lifted verbatim (parameters object →
             // compact JSON) so the UI can show what the tool was asked to do.
             let input = record.get("parameters").map(value_to_display_string);
+            let tool_kind = bob_tool_kind(&name);
             ParsedLine {
-                tool_start: Some(ToolCallStart { tool_call_id, name, input }),
+                tool_start: Some(ToolCallStart { tool_call_id, name, input, tool_kind }),
                 ..ParsedLine::default()
             }
         }

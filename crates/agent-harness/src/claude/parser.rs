@@ -15,7 +15,21 @@
 
 use serde_json::Value;
 
-use crate::{ParsedLine, SessionInfo, ToolCallEnd, ToolCallStart, UsageInfo};
+use crate::{ParsedLine, SessionInfo, ToolCallEnd, ToolCallStart, ToolKind, UsageInfo};
+
+/// Classify a Claude Code tool name into the neutral [`ToolKind`]. Claude
+/// reaches the consumer through `RunEvent`, so this classifier stays private
+/// — the kind rides on the event, the consumer never sees `Read`/`Edit`/….
+fn claude_tool_kind(name: &str) -> ToolKind {
+    match name {
+        "Read" | "NotebookRead" => ToolKind::Read,
+        "Write" => ToolKind::Write,
+        "Edit" | "MultiEdit" | "NotebookEdit" => ToolKind::Edit,
+        "Grep" | "Glob" | "WebSearch" | "WebFetch" => ToolKind::Search,
+        "Bash" | "BashOutput" => ToolKind::Execute,
+        _ => ToolKind::Other,
+    }
+}
 
 /// Parse one line of Claude Code's `stream-json` output into the
 /// shared [`ParsedLine`] shape. See the module docs for the wire
@@ -94,6 +108,7 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
                                 tool_call_id: id.to_owned(),
                                 name: name.to_owned(),
                                 input: None,
+                                tool_kind: claude_tool_kind(name),
                             }),
                             ..ParsedLine::default()
                         };

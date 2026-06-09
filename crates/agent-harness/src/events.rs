@@ -42,18 +42,45 @@ pub struct SuggestedEdit {
     pub title: Option<String>,
 }
 
+/// A neutral, cross-harness classification of what a tool call *does* — so a
+/// consumer can route by behaviour (a read → a context pill, an edit → a
+/// file-op card) without re-encoding each harness's native tool vocabulary
+/// (bob's `read_file`, Claude's `Read`, codex's `file_change`). The raw
+/// `name` is kept alongside for display/phrasing; `tool_kind` is for
+/// behaviour. Named `tool_kind` (not `kind`) so it never collides with the
+/// `#[serde(tag = "kind")]` event discriminator on [`RunEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub enum ToolKind {
+    /// Read or inspect a file's contents.
+    Read,
+    /// Create or overwrite a whole file.
+    Write,
+    /// Modify part of an existing file.
+    Edit,
+    /// Search or list files / the web.
+    Search,
+    /// Run a shell command or external process.
+    Execute,
+    /// Anything else (MCP calls, task spawns, completion signals, …).
+    Other,
+}
+
 /// A tool call beginning — its id + name, so the UI can render a
 /// state-ful card (running → done/✗) keyed by `tool_call_id`. `input`
 /// carries the call's arguments when the harness delivers them inline
 /// at the start (bob's `parameters`, codex's `command`); it is `None`
 /// when the harness streams them incrementally (Claude's
-/// `input_json_delta`), so the card stays correct either way.
+/// `input_json_delta`), so the card stays correct either way. `tool_kind`
+/// is the neutral behaviour class (see [`ToolKind`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallStart {
     pub tool_call_id: String,
     pub name: String,
     pub input: Option<String>,
+    pub tool_kind: ToolKind,
 }
 
 /// A tool call finishing — matched to its start by `tool_call_id`.
@@ -115,6 +142,7 @@ pub enum RunEvent {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         input: Option<String>,
+        tool_kind: ToolKind,
     },
     /// A tool call finished (matched to its start by id). `output` is the
     /// tool's result when the harness reports it inline (omitted when absent).
@@ -288,6 +316,7 @@ pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent>
             tool_call_id: start.tool_call_id,
             name: start.name,
             input: start.input,
+            tool_kind: start.tool_kind,
         });
     }
     if let Some(end) = parsed.tool_end {
@@ -507,6 +536,7 @@ mod tests {
                     tool_call_id: "t1".to_owned(),
                     name: "ls".to_owned(),
                     input: Some("{\"dir\":\"/x\"}".to_owned()),
+                    tool_kind: ToolKind::Other,
                 }),
                 ..ParsedLine::default()
             },
@@ -522,9 +552,13 @@ mod tests {
             tool_call_id: "t1".to_owned(),
             name: "ls".to_owned(),
             input: None,
+            tool_kind: ToolKind::Execute,
         })
         .unwrap();
         assert_eq!(json["kind"], "toolStart");
+        // The neutral class rides alongside as `toolKind` — distinct wire key
+        // from the `kind` event discriminator (no collision).
+        assert_eq!(json["toolKind"], "execute");
         assert_eq!(json["toolCallId"], "t1");
         assert!(json.get("input").is_none());
 
