@@ -347,13 +347,18 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
             }
             ParsedLine::default()
         }
+        // A terminal in-band failure codex reports on stdout. It is NOT
+        // transient narration — downgrading it to `activity` (as before) meant
+        // a failed turn surfaced no error at all. Map it to `error` so it
+        // becomes a `RunEvent::Error` the consumer can render.
         Some("error") => {
             let message = obj
                 .get("message")
                 .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
                 .unwrap_or("Codex error");
             ParsedLine {
-                activity: Some(truncate(message, 240)),
+                error: Some(truncate(message, 240)),
                 ..ParsedLine::default()
             }
         }
@@ -391,7 +396,24 @@ pub fn parse_codex_line(line: &str) -> ParsedLine {
                 ..ParsedLine::default()
             }
         }
-        // turn.started / turn.failed / item.updated: lifecycle / partials — ignored.
+        // turn.failed → a terminal in-band failure (quota mid-turn, context
+        // overflow, model error). codex nests the reason at `error.message`
+        // (verified against codex-rs `exec/src/exec_events.rs`); surface it as
+        // a real error rather than silently ignoring it.
+        Some("turn.failed") => {
+            let message = obj
+                .get("error")
+                .and_then(Value::as_object)
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Codex turn failed");
+            ParsedLine {
+                error: Some(truncate(message, 240)),
+                ..ParsedLine::default()
+            }
+        }
+        // turn.started / item.updated: lifecycle / partials — ignored.
         _ => ParsedLine::default(),
     }
 }
@@ -529,9 +551,29 @@ mod tests {
     }
 
     #[test]
-    fn error_event_becomes_activity() {
+    fn error_event_becomes_error_not_activity() {
+        // A codex `error` line is a real failure, not transient narration: it
+        // must decode to `error` (→ RunEvent::Error), never to `activity`.
         let line = r#"{"type":"error","message":"rate limited"}"#;
-        assert_eq!(parse_codex_line(line).activity.as_deref(), Some("rate limited"));
+        let parsed = parse_codex_line(line);
+        assert_eq!(parsed.error.as_deref(), Some("rate limited"));
+        assert!(parsed.activity.is_none());
+    }
+
+    #[test]
+    fn turn_failed_becomes_error() {
+        // codex reports a mid-turn failure as `turn.failed` with the reason
+        // nested at `error.message`. Previously ignored (→ no answer AND no
+        // error); now it surfaces as `error` → RunEvent::Error.
+        let line = r#"{"type":"turn.failed","error":{"message":"context window exceeded"}}"#;
+        let parsed = parse_codex_line(line);
+        assert_eq!(parsed.error.as_deref(), Some("context window exceeded"));
+        assert!(parsed.activity.is_none() && parsed.text.is_none());
+
+        // Defensive: a turn.failed without a usable message still surfaces an
+        // error (never silence).
+        let bare = parse_codex_line(r#"{"type":"turn.failed"}"#);
+        assert_eq!(bare.error.as_deref(), Some("Codex turn failed"));
     }
 
     #[test]
@@ -638,6 +680,39 @@ mod tests {
                 .to_owned(),
         });
         assert!(out.is_empty(), "codex stderr is tracing noise → dropped, got {out:?}");
+    }
+
+    #[test]
+    fn codex_turn_failed_surfaces_as_error_through_stream_parser() {
+        // End-to-end on the production codex path (CodexStreamParser → not
+        // normalize_process_event): a `turn.failed` stdout line must yield a
+        // RunEvent::Error so the failure isn't silently swallowed.
+        let mut p = CodexStreamParser::new();
+        let out = stdout(
+            &mut p,
+            r#"{"type":"turn.failed","error":{"message":"quota exceeded"}}"#,
+        );
+        assert!(
+            out.iter().any(
+                |e| matches!(e, RunEvent::Error { message, .. } if message == "quota exceeded")
+            ),
+            "turn.failed must surface as RunEvent::Error, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn codex_error_line_surfaces_as_error_through_stream_parser() {
+        // The other in-band failure shape: a standalone `error` line.
+        let mut p = CodexStreamParser::new();
+        let out = stdout(&mut p, r#"{"type":"error","message":"rate limited"}"#);
+        assert!(
+            out.iter().any(
+                |e| matches!(e, RunEvent::Error { message, .. } if message == "rate limited")
+            ),
+            "error line must surface as RunEvent::Error, got {out:?}"
+        );
+        // And it's a real error, not transient narration.
+        assert!(!out.iter().any(|e| matches!(e, RunEvent::Activity { .. })));
     }
 
     #[test]

@@ -218,6 +218,13 @@ pub struct ParsedLine {
     /// Token accounting → `RunEvent::Usage`.
     pub usage: Option<UsageInfo>,
     pub activity: Option<String>,
+    /// An in-band failure the harness reported on its *stdout* (codex's
+    /// `turn.failed` / `error` lines) → `RunEvent::Error`. Terminal. Kept
+    /// distinct from `activity` so a real failure (quota mid-turn, context
+    /// overflow, model error) surfaces as an error instead of being downgraded
+    /// to transient narration — otherwise a failed turn yields no answer *and*
+    /// no error, looking like the harness silently did nothing.
+    pub error: Option<String>,
 }
 
 impl ParsedLine {
@@ -233,6 +240,7 @@ impl ParsedLine {
             && self.edits.is_empty()
             && self.usage.is_none()
             && self.activity.is_none()
+            && self.error.is_none()
     }
 }
 
@@ -277,7 +285,9 @@ pub fn normalize_process_event(
 
 /// Expand a decoded [`ParsedLine`] into its [`RunEvent`]s for `run_id`, in a
 /// stable order: session (the run's init) → text → thinking → tool
-/// start/end → edits → usage (end of turn) → activity.
+/// start/end → edits → usage (end of turn) → activity → error (a terminal
+/// in-band failure, emitted last so any text/usage on the same line lands
+/// before it).
 ///
 /// Used by [`normalize_process_event`] and by adapters that wrap the line
 /// parser in their own per-run state (e.g. codex's preamble-vs-answer state
@@ -345,6 +355,16 @@ pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent>
         out.push(RunEvent::Activity {
             run_id: run_id.to_owned(),
             message: activity,
+        });
+    }
+    // A harness reported an in-band failure on its stdout. This is the one
+    // place a parsed line can become `RunEvent::Error` (the only other source
+    // is a process-level `ProcessEvent::Error`), so an in-band failure from any
+    // harness — not just a spawn/IO failure — reaches the consumer.
+    if let Some(message) = parsed.error {
+        out.push(RunEvent::Error {
+            run_id: run_id.to_owned(),
+            message,
         });
     }
     out
@@ -571,6 +591,33 @@ mod tests {
         .unwrap();
         assert_eq!(json["kind"], "toolEnd");
         assert_eq!(json["output"], "done");
+    }
+
+    #[test]
+    fn parsed_error_normalizes_to_run_event_error() {
+        // An in-band failure decoded onto a ParsedLine surfaces as
+        // RunEvent::Error — the path codex's `turn.failed` / `error` lines now
+        // take, so a failed turn no longer yields neither answer nor error.
+        let events = normalize_process_event(
+            ProcessEvent::Stdout {
+                run_id: "r1".to_owned(),
+                line: "ignored".to_owned(),
+            },
+            |_| ParsedLine {
+                error: Some("rate limited".to_owned()),
+                ..ParsedLine::default()
+            },
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [RunEvent::Error { run_id, message }] if run_id == "r1" && message == "rate limited"
+        ));
+        // An error-only line is not empty (is_empty stays honest).
+        assert!(!ParsedLine {
+            error: Some("x".to_owned()),
+            ..ParsedLine::default()
+        }
+        .is_empty());
     }
 
     #[test]
