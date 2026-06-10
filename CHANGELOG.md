@@ -7,6 +7,19 @@ unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Added
+- **`RunEvent::AskQuestion` — neutral interactive-question event (additive; no
+  adapter emits it yet).** When an agent asks the user a multiple-choice question
+  (Claude's `AskUserQuestion`, Codex's `tool/requestUserInput`), the adapter maps
+  it onto `AskQuestion { run_id, request_id, questions }` carrying neutral
+  `Question` / `QuestionOption` types, so a host renders chips without
+  name-checking a harness's tool — the way `ToolKind` already neutralizes tool
+  names. The answer travels back as the user's **next chat message** (the host's
+  existing send-path resumes the session), so this is one event, no new control
+  channel: `RunControl` is unchanged and no stdin write-back is involved. The
+  enum is already `#[non_exhaustive]`, so the new variant doesn't break consumers
+  with a `_` arm.
+
 ## [0.3.1] - 2026-06-10
 
 ### Added

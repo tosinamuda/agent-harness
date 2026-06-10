@@ -26,8 +26,9 @@ pub mod harness;
 pub mod raw;
 
 pub use events::{
-    normalize_process_event, run_events_from_parsed, ByteRange, ParsedLine, RunEvent, SessionInfo,
-    SuggestedEdit, ToolCallEnd, ToolCallStart, ToolKind, UsageInfo,
+    normalize_process_event, run_events_from_parsed, ByteRange, ParsedLine, Question,
+    QuestionOption, RunEvent, SessionInfo, SuggestedEdit, ToolCallEnd, ToolCallStart, ToolKind,
+    UsageInfo,
 };
 pub use raw::parse_raw_line;
 pub use harness::{

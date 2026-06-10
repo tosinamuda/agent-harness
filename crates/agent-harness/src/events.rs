@@ -175,6 +175,20 @@ pub enum RunEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         total_tokens: Option<u64>,
     },
+    /// The agent is asking the user one or more multiple-choice questions
+    /// (Claude's `AskUserQuestion`, Codex's `tool/requestUserInput`). The host
+    /// renders the options as selectable chips; the user's pick is sent back as
+    /// their **next message** on the existing chat path (which resumes the
+    /// session), so the agent continues with the answer in hand. Carrying the
+    /// questions as a neutral event keeps the harness-specific tool shape in the
+    /// adapter — the host never name-checks `AskUserQuestion` (cf. `ToolKind`).
+    AskQuestion {
+        run_id: String,
+        /// Identifies this question instance (the harness's tool-call id), so
+        /// the host can tie the answer + clear the chips for the right one.
+        request_id: String,
+        questions: Vec<Question>,
+    },
     /// Spawn / IO / parse failure. Terminal — followed by `Exited`.
     Error { run_id: String, message: String },
     /// The run finished. Sent exactly once.
@@ -198,6 +212,33 @@ pub struct UsageInfo {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+}
+
+/// One multiple-choice question carried by [`RunEvent::AskQuestion`]. The
+/// neutral shape every adapter maps its harness's question tool onto. Wire-out
+/// only (Serialize), like the rest of [`RunEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Question {
+    /// Short label for the question (Claude's `header`); optional.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// The question text shown to the user.
+    pub prompt: String,
+    pub options: Vec<QuestionOption>,
+    /// Whether more than one option may be selected.
+    pub multi_select: bool,
+    /// Whether a free-text ("Other") answer is allowed alongside the options.
+    pub allow_free_text: bool,
+}
+
+/// One selectable option of a [`Question`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// What a single harness output line decoded to. A line can yield
@@ -473,6 +514,40 @@ mod tests {
         assert_eq!(json["runId"], "r1");
         assert_eq!(json["exitCode"], 2);
         assert_eq!(json["cancelled"], true);
+    }
+
+    #[test]
+    fn ask_question_serializes_with_camelcase_and_skips_empty_description() {
+        let json = serde_json::to_value(RunEvent::AskQuestion {
+            run_id: "r1".to_owned(),
+            request_id: "q-7".to_owned(),
+            questions: vec![Question {
+                header: Some("Scope".to_owned()),
+                prompt: "Which files?".to_owned(),
+                options: vec![
+                    QuestionOption { label: "All".to_owned(), description: None },
+                    QuestionOption {
+                        label: "Changed only".to_owned(),
+                        description: Some("Just the diff".to_owned()),
+                    },
+                ],
+                multi_select: true,
+                allow_free_text: false,
+            }],
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "askQuestion");
+        assert_eq!(json["runId"], "r1");
+        assert_eq!(json["requestId"], "q-7");
+        let q = &json["questions"][0];
+        assert_eq!(q["header"], "Scope");
+        assert_eq!(q["prompt"], "Which files?");
+        assert_eq!(q["multiSelect"], true);
+        assert_eq!(q["allowFreeText"], false);
+        assert_eq!(q["options"][0]["label"], "All");
+        // A `None` description is omitted from the wire (skip_serializing_if).
+        assert!(q["options"][0].get("description").is_none());
+        assert_eq!(q["options"][1]["description"], "Just the diff");
     }
 
     #[test]
