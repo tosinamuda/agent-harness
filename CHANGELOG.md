@@ -7,6 +7,8 @@ unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-10
+
 ### Added
 - **Host-controlled CLI args via `RunTuning.extra_args`.** A host can pass raw
   flags, appended after an adapter's own argv — to add a flag (`--settings`,
