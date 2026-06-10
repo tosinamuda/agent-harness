@@ -8,17 +8,19 @@ unreleased changes accumulate under **Unreleased** until the next release.
 ## [Unreleased]
 
 ### Added
-- **Host-controlled CLI args via `RunTuning.extra_args`.** A host can append raw
-  flags after an adapter's own argv — to add a flag (`--settings`, `--add-dir`)
-  or override one the adapter already sets (last-wins, for a commander-style CLI
-  like Claude Code) — without editing the adapter. The Claude adapter appends
-  them at the end of its argv; the Codex adapter before its trailing positional
-  prompt; the bob adapter spawns via `spawn_bob` and ignores them (no raw argv).
-  The point is to keep run *policy* on the host: a fully-headless host that
+- **Host-controlled CLI args via `RunTuning.extra_args`.** A host can pass raw
+  flags, appended after an adapter's own argv — to add a flag (`--settings`,
+  `--add-dir`) or set one the adapter otherwise defaults — without editing the
+  adapter. Crucially, the adapter's defaults are *defaults, not fixed*: the
+  Claude adapter omits its own `--permission-mode acceptEdits` when the host
+  sets `--permission-mode` through `extra_args`, so the host fully owns the flag
+  (a sensible default exists, but it's cleanly overridable — no duplicate). The
+  Claude adapter appends at the end of its argv; the Codex adapter before its
+  trailing positional prompt; the bob adapter spawns via `spawn_bob` and ignores
+  them (no raw argv). Keeps run *policy* on the host: a fully-headless host that
   needs Bash/skills to run without an unanswerable permission prompt passes
-  `--permission-mode bypassPermissions` through `extra_args` instead of the
-  adapter hardcoding a mode. Additive: the field defaults empty, so every
-  existing caller is unaffected.
+  `--permission-mode bypassPermissions`. Additive: the field defaults empty, so
+  every existing caller is unaffected.
 
 ## [0.3.0] - 2026-06-09
 

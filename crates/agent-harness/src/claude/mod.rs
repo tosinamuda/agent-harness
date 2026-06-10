@@ -221,19 +221,26 @@ fn build_claude_args(prompt: String, mode: RunMode, tuning: &RunTuning) -> Vec<S
         args.push("--max-turns".to_owned());
         args.push(max_turns.to_string());
     }
-    if matches!(mode, RunMode::Edit) {
-        // Conservative default: auto-approve file edits, leave everything else
-        // (Bash, etc.) gated. A host that wants a different policy — e.g.
-        // `bypassPermissions` for fully headless runs, or a sandbox via
-        // `--settings` — overrides it through `tuning.extra_args` below
-        // (last-wins for a repeated `--permission-mode`), with no adapter edit.
-        // In Ask mode the CLI stays read-only by default.
+    // Conservative *default* permission mode (auto-approve edits; Bash etc.
+    // stay gated), emitted only when the caller hasn't set `--permission-mode`
+    // through `extra_args`. So there is a sensible default, but a host fully
+    // controls the mode — `bypassPermissions` for headless, `auto`, … — by
+    // passing its own, with no adapter edit and no duplicate flag. In Ask mode
+    // the CLI stays read-only by default.
+    if matches!(mode, RunMode::Edit) && !extra_args_sets(&tuning.extra_args, "--permission-mode") {
         args.push("--permission-mode".to_owned());
         args.push("acceptEdits".to_owned());
     }
-    // Host passthrough/overrides last, so a repeated flag wins.
+    // Host passthrough/overrides, appended verbatim after the adapter's own.
     args.extend(tuning.extra_args.iter().cloned());
     args
+}
+
+/// Whether the host's `extra_args` already sets `flag` (so the adapter should
+/// not also emit its own default for it). Matches `--flag` and `--flag=value`.
+fn extra_args_sets(extra_args: &[String], flag: &str) -> bool {
+    let with_eq = format!("{flag}=");
+    extra_args.iter().any(|a| a == flag || a.starts_with(&with_eq))
 }
 
 /// Run `<program> --version`, returning the trimmed stdout on
@@ -321,33 +328,40 @@ mod tests {
     }
 
     #[test]
-    fn extra_args_are_appended_after_the_adapters_own() {
-        // A host can add a flag and override one the adapter already set; the
-        // override rides on last-wins, so it must come *after* the default.
+    fn host_extra_args_are_appended_verbatim() {
+        // A host adds flags the adapter doesn't manage — appended as given.
         let tuning = RunTuning {
-            extra_args: vec![
-                "--permission-mode".to_owned(),
-                "bypassPermissions".to_owned(),
-                "--add-dir".to_owned(),
-                "/extra".to_owned(),
-            ],
+            extra_args: vec!["--add-dir".to_owned(), "/extra".to_owned()],
+            ..RunTuning::default()
+        };
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning);
+        assert!(args.ends_with(&["--add-dir".to_owned(), "/extra".to_owned()]));
+    }
+
+    #[test]
+    fn host_permission_mode_replaces_the_default_cleanly() {
+        // When the host sets --permission-mode, the adapter does NOT also emit
+        // its acceptEdits default — the host fully owns the flag, no duplicate.
+        let tuning = RunTuning {
+            extra_args: vec!["--permission-mode".to_owned(), "bypassPermissions".to_owned()],
             ..RunTuning::default()
         };
         let args = build_claude_args("hi".to_owned(), RunMode::Edit, &tuning);
-        assert!(args.ends_with(&[
-            "--permission-mode".to_owned(),
-            "bypassPermissions".to_owned(),
-            "--add-dir".to_owned(),
-            "/extra".to_owned(),
-        ]));
         let modes: Vec<usize> = args
             .iter()
             .enumerate()
             .filter(|(_, a)| a.as_str() == "--permission-mode")
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(modes.len(), 2, "adapter default + host override both present");
-        assert_eq!(args[modes[0] + 1], "acceptEdits");
-        assert_eq!(args[modes[1] + 1], "bypassPermissions");
+        assert_eq!(modes.len(), 1, "exactly one --permission-mode (the host's)");
+        assert_eq!(args[modes[0] + 1], "bypassPermissions");
+        assert!(!args.iter().any(|a| a == "acceptEdits"));
+    }
+
+    #[test]
+    fn extra_args_sets_matches_flag_and_flag_eq_value() {
+        assert!(extra_args_sets(&["--permission-mode".to_owned()], "--permission-mode"));
+        assert!(extra_args_sets(&["--permission-mode=auto".to_owned()], "--permission-mode"));
+        assert!(!extra_args_sets(&["--add-dir".to_owned()], "--permission-mode"));
     }
 }
