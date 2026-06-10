@@ -23,6 +23,7 @@ fn main() -> Result<(), BobError> {
             max_coins: 30,
             cwd: None,            // defaults to the current directory
             bob_executable: None, // defaults to `bob` on PATH
+            extra_args: Vec::new(),
         },
         "demo".into(),
         move |ev| {

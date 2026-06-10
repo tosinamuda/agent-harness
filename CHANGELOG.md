@@ -14,13 +14,14 @@ unreleased changes accumulate under **Unreleased** until the next release.
   adapter. Crucially, the adapter's defaults are *defaults, not fixed*: the
   Claude adapter omits its own `--permission-mode acceptEdits` when the host
   sets `--permission-mode` through `extra_args`, so the host fully owns the flag
-  (a sensible default exists, but it's cleanly overridable — no duplicate). The
-  Claude adapter appends at the end of its argv; the Codex adapter before its
-  trailing positional prompt; the bob adapter spawns via `spawn_bob` and ignores
-  them (no raw argv). Keeps run *policy* on the host: a fully-headless host that
-  needs Bash/skills to run without an unanswerable permission prompt passes
-  `--permission-mode bypassPermissions`. Additive: the field defaults empty, so
-  every existing caller is unaffected.
+  (a sensible default exists, but it's cleanly overridable — no duplicate).
+  **All three adapters honor it uniformly**, so a client applies a flag the same
+  way regardless of harness: Claude appends at the end of its argv; Codex before
+  its trailing positional prompt; bob threads them through the new
+  `RunBobOptions.extra_args` (bob-rs) into its own argv. Keeps run *policy* on
+  the host: a fully-headless host that needs Bash/skills to run without an
+  unanswerable permission prompt passes `--permission-mode bypassPermissions`.
+  Additive: the field defaults empty, so every existing caller is unaffected.
 
 ## [0.3.0] - 2026-06-09
 

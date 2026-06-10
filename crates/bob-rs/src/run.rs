@@ -79,6 +79,11 @@ pub struct RunBobOptions {
     /// to `bob` on PATH.
     #[serde(default)]
     pub bob_executable: Option<PathBuf>,
+    /// Extra CLI args the caller appends verbatim after bob's own argv —
+    /// the same host-controlled passthrough the other adapters expose, so
+    /// a client can apply a flag uniformly across harnesses. Default empty.
+    #[serde(default)]
+    pub extra_args: Vec<String>,
 }
 
 fn default_chat_mode() -> BobChatMode { BobChatMode::Ask }
@@ -139,7 +144,7 @@ where
 /// Build the bob CLI argv. Mirrors the structure used by both the Vite
 /// `bobRunPlugin` and the Tauri `build_bob_command`.
 fn build_args(opts: &RunBobOptions) -> Vec<String> {
-    vec![
+    let mut args = vec![
         opts.prompt.clone(),
         "--chat-mode".to_owned(),
         opts.chat_mode.as_cli_value().to_owned(),
@@ -150,5 +155,41 @@ fn build_args(opts: &RunBobOptions) -> Vec<String> {
         "--accept-license".to_owned(),
         "--max-coins".to_owned(),
         opts.max_coins.to_string(),
-    ]
+    ];
+    // Host passthrough, appended verbatim after bob's own argv.
+    args.extend(opts.extra_args.iter().cloned());
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(extra_args: Vec<String>) -> RunBobOptions {
+        RunBobOptions {
+            prompt: "hi".to_owned(),
+            chat_mode: BobChatMode::Ask,
+            approval_mode: BobApprovalMode::Default,
+            max_coins: 30,
+            cwd: None,
+            bob_executable: None,
+            extra_args,
+        }
+    }
+
+    #[test]
+    fn build_args_appends_extra_args_after_bobs_own() {
+        let args = build_args(&opts(vec!["--foo".to_owned(), "bar".to_owned()]));
+        // bob's own argv stays intact (prompt positional first, format flag present)…
+        assert_eq!(args.first().map(String::as_str), Some("hi"));
+        assert!(args.contains(&"stream-json".to_owned()));
+        // …and the host's flags are appended verbatim at the end.
+        assert!(args.ends_with(&["--foo".to_owned(), "bar".to_owned()]));
+    }
+
+    #[test]
+    fn build_args_with_no_extra_is_unchanged() {
+        let args = build_args(&opts(Vec::new()));
+        assert_eq!(args.last().map(String::as_str), Some("30"));
+    }
 }
