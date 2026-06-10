@@ -100,6 +100,10 @@ impl Harness for BobHarness {
             max_coins: 30,
             cwd: request.cwd,
             bob_executable: None,
+            // Host passthrough — the same RunTuning.extra_args the claude/codex
+            // adapters honor, so a client applies a flag uniformly across all
+            // three harnesses (bob appends it to its own argv).
+            extra_args: request.tuning.extra_args,
         };
         // bob emits its own process events (lifecycle + raw stream-json
         // stdout lines). Normalize each into zero or more harness-neutral

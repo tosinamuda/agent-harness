@@ -209,6 +209,13 @@ pub struct RunTuning {
     pub effort: Option<ReasoningEffort>,
     /// Cap on agentic turns (Claude: `--max-turns`).
     pub max_turns: Option<u32>,
+    /// Raw CLI args the host appends verbatim **after** the adapter's own,
+    /// so a host can add a flag (`--settings`, `--add-dir`) or override one
+    /// it already sets — for CLIs where a repeated flag is last-wins (e.g.
+    /// Claude Code / commander) — without editing the adapter. The host opts
+    /// into CLI-specific flag names when it uses this; keep cross-harness
+    /// knobs as their own typed fields above. Default empty.
+    pub extra_args: Vec<String>,
 }
 
 /// A harness-neutral run request. Adapter-specific knobs (bob's

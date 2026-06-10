@@ -246,6 +246,8 @@ fn build_codex_args(prompt: String, mode: RunMode, tuning: &RunTuning) -> Vec<St
         // vary by codex version; --full-auto is the stable one.)
         args.push("--full-auto".to_owned());
     }
+    // Host passthrough/overrides — before the trailing positional prompt.
+    args.extend(tuning.extra_args.iter().cloned());
     args.push(prompt);
     args
 }
@@ -293,6 +295,7 @@ mod tests {
             model: Some("gpt-5-codex".to_owned()),
             effort: Some(ReasoningEffort::High),
             max_turns: Some(5),
+            ..RunTuning::default()
         };
         let args = build_codex_args("hi".to_owned(), RunMode::Edit, &tuning);
         assert_eq!(flag_value(&args, "--model"), Some("gpt-5-codex"));
