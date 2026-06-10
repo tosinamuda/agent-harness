@@ -222,11 +222,17 @@ fn build_claude_args(prompt: String, mode: RunMode, tuning: &RunTuning) -> Vec<S
         args.push(max_turns.to_string());
     }
     if matches!(mode, RunMode::Edit) {
-        // Let Claude write files without an interactive prompt in
-        // Edit mode; in Ask mode it stays read-only by default.
+        // Conservative default: auto-approve file edits, leave everything else
+        // (Bash, etc.) gated. A host that wants a different policy — e.g.
+        // `bypassPermissions` for fully headless runs, or a sandbox via
+        // `--settings` — overrides it through `tuning.extra_args` below
+        // (last-wins for a repeated `--permission-mode`), with no adapter edit.
+        // In Ask mode the CLI stays read-only by default.
         args.push("--permission-mode".to_owned());
         args.push("acceptEdits".to_owned());
     }
+    // Host passthrough/overrides last, so a repeated flag wins.
+    args.extend(tuning.extra_args.iter().cloned());
     args
 }
 
@@ -291,6 +297,7 @@ mod tests {
             model: Some("opus".to_owned()),
             effort: Some(ReasoningEffort::High),
             max_turns: Some(5),
+            ..RunTuning::default()
         };
         let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning);
         assert_eq!(flag_value(&args, "--model"), Some("opus"));
@@ -307,8 +314,40 @@ mod tests {
     }
 
     #[test]
-    fn claude_edit_mode_accepts_edits() {
+    fn claude_edit_mode_defaults_to_accept_edits() {
+        // Conservative built-in default; a host overrides via extra_args.
         let args = build_claude_args("hi".to_owned(), RunMode::Edit, &RunTuning::default());
         assert_eq!(flag_value(&args, "--permission-mode"), Some("acceptEdits"));
+    }
+
+    #[test]
+    fn extra_args_are_appended_after_the_adapters_own() {
+        // A host can add a flag and override one the adapter already set; the
+        // override rides on last-wins, so it must come *after* the default.
+        let tuning = RunTuning {
+            extra_args: vec![
+                "--permission-mode".to_owned(),
+                "bypassPermissions".to_owned(),
+                "--add-dir".to_owned(),
+                "/extra".to_owned(),
+            ],
+            ..RunTuning::default()
+        };
+        let args = build_claude_args("hi".to_owned(), RunMode::Edit, &tuning);
+        assert!(args.ends_with(&[
+            "--permission-mode".to_owned(),
+            "bypassPermissions".to_owned(),
+            "--add-dir".to_owned(),
+            "/extra".to_owned(),
+        ]));
+        let modes: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.as_str() == "--permission-mode")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(modes.len(), 2, "adapter default + host override both present");
+        assert_eq!(args[modes[0] + 1], "acceptEdits");
+        assert_eq!(args[modes[1] + 1], "bypassPermissions");
     }
 }

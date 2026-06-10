@@ -7,6 +7,19 @@ unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+### Added
+- **Host-controlled CLI args via `RunTuning.extra_args`.** A host can append raw
+  flags after an adapter's own argv — to add a flag (`--settings`, `--add-dir`)
+  or override one the adapter already sets (last-wins, for a commander-style CLI
+  like Claude Code) — without editing the adapter. The Claude adapter appends
+  them at the end of its argv; the Codex adapter before its trailing positional
+  prompt; the bob adapter spawns via `spawn_bob` and ignores them (no raw argv).
+  The point is to keep run *policy* on the host: a fully-headless host that
+  needs Bash/skills to run without an unanswerable permission prompt passes
+  `--permission-mode bypassPermissions` through `extra_args` instead of the
+  adapter hardcoding a mode. Additive: the field defaults empty, so every
+  existing caller is unaffected.
+
 ## [0.3.0] - 2026-06-09
 
 ### Fixed
