@@ -135,8 +135,8 @@ impl Harness for ClaudeHarness {
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
-        let RunRequest { run_id, prompt, cwd, mode, tuning } = request;
-        let args = build_claude_args(prompt, mode, &tuning);
+        let RunRequest { run_id, prompt, cwd, mode, tuning, resume } = request;
+        let args = build_claude_args(prompt, mode, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         // No env injected — Claude Code uses its own auth. PATH
@@ -204,7 +204,12 @@ fn probe_claude_signed_in() -> bool {
 /// `--model`, `tuning.max_turns` → `--max-turns`; Claude Code has no
 /// reasoning-effort `-p` flag, so `tuning.effort` is intentionally
 /// ignored here.
-fn build_claude_args(prompt: String, mode: RunMode, tuning: &RunTuning) -> Vec<String> {
+fn build_claude_args(
+    prompt: String,
+    mode: RunMode,
+    tuning: &RunTuning,
+    resume: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "-p".to_owned(),
         prompt,
@@ -213,6 +218,11 @@ fn build_claude_args(prompt: String, mode: RunMode, tuning: &RunTuning) -> Vec<S
         "--verbose".to_owned(),
         "--include-partial-messages".to_owned(),
     ];
+    // Continue a prior session instead of replaying history in the prompt.
+    if let Some(session_id) = resume {
+        args.push("--resume".to_owned());
+        args.push(session_id.to_owned());
+    }
     if let Some(model) = tuning.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         args.push("--model".to_owned());
         args.push(model.to_owned());
@@ -289,13 +299,23 @@ mod tests {
 
     #[test]
     fn claude_args_default_omit_model_and_turn_cap() {
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &RunTuning::default());
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), None);
         // Prompt is the positional right after `-p`.
         assert_eq!(args[0], "-p");
         assert_eq!(args[1], "hi");
         assert!(!args.iter().any(|a| a == "--model"));
         assert!(!args.iter().any(|a| a == "--max-turns"));
         assert!(!args.iter().any(|a| a == "--permission-mode"));
+    }
+
+    #[test]
+    fn claude_resume_adds_session_flag() {
+        let args =
+            build_claude_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), Some("sess-123"));
+        assert_eq!(flag_value(&args, "--resume"), Some("sess-123"));
+        // The prompt + headless stream flags are untouched.
+        assert_eq!(args[0], "-p");
+        assert_eq!(args[1], "hi");
     }
 
     #[test]
@@ -306,7 +326,7 @@ mod tests {
             max_turns: Some(5),
             ..RunTuning::default()
         };
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning);
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning, None);
         assert_eq!(flag_value(&args, "--model"), Some("opus"));
         assert_eq!(flag_value(&args, "--max-turns"), Some("5"));
         // Claude Code has no reasoning-effort `-p` flag — it must not leak.
@@ -316,14 +336,14 @@ mod tests {
     #[test]
     fn claude_blank_model_is_treated_as_unset() {
         let tuning = RunTuning { model: Some("   ".to_owned()), ..RunTuning::default() };
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning);
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning, None);
         assert!(!args.iter().any(|a| a == "--model"));
     }
 
     #[test]
     fn claude_edit_mode_defaults_to_accept_edits() {
         // Conservative built-in default; a host overrides via extra_args.
-        let args = build_claude_args("hi".to_owned(), RunMode::Edit, &RunTuning::default());
+        let args = build_claude_args("hi".to_owned(), RunMode::Edit, &RunTuning::default(), None);
         assert_eq!(flag_value(&args, "--permission-mode"), Some("acceptEdits"));
     }
 
@@ -334,7 +354,7 @@ mod tests {
             extra_args: vec!["--add-dir".to_owned(), "/extra".to_owned()],
             ..RunTuning::default()
         };
-        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning);
+        let args = build_claude_args("hi".to_owned(), RunMode::Ask, &tuning, None);
         assert!(args.ends_with(&["--add-dir".to_owned(), "/extra".to_owned()]));
     }
 
@@ -346,7 +366,7 @@ mod tests {
             extra_args: vec!["--permission-mode".to_owned(), "bypassPermissions".to_owned()],
             ..RunTuning::default()
         };
-        let args = build_claude_args("hi".to_owned(), RunMode::Edit, &tuning);
+        let args = build_claude_args("hi".to_owned(), RunMode::Edit, &tuning, None);
         let modes: Vec<usize> = args
             .iter()
             .enumerate()

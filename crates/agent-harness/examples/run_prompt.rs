@@ -22,6 +22,7 @@ fn main() -> Result<(), HarnessError> {
         cwd: None,                    // working dir for the agent's tool calls
         mode: RunMode::Ask,           // Ask = answer only; Edit = may edit files
         tuning: RunTuning::default(), // optional: model / effort / max_turns
+        resume: None,                 // Some(session_id) to continue a prior run
     })?; // keep `_handle` to `.cancel()`; dropping it does NOT stop the run
 
     // ONE normalized event stream, regardless of the backing CLI. `rx` hangs

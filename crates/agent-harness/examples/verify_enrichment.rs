@@ -42,6 +42,7 @@ fn main() -> Result<(), String> {
             cwd: Some(std::env::current_dir().map_err(|e| e.to_string())?),
             mode: RunMode::Ask,
             tuning,
+            resume: None,
         },
         on_event,
     )
