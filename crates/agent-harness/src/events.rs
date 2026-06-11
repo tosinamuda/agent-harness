@@ -266,6 +266,12 @@ pub struct ParsedLine {
     /// to transient narration — otherwise a failed turn yields no answer *and*
     /// no error, looking like the harness silently did nothing.
     pub error: Option<String>,
+    /// A harness asked the user a multiple-choice question (Claude's
+    /// `AskUserQuestion`) → `RunEvent::AskQuestion`. The tuple is `(request_id,
+    /// questions)`: the tool-call id the host echoes when tying the answer and
+    /// clearing the chips, plus the parsed questions. The host renders the
+    /// options as chips; the answer returns as the user's next message.
+    pub ask_question: Option<(String, Vec<Question>)>,
 }
 
 impl ParsedLine {
@@ -282,6 +288,7 @@ impl ParsedLine {
             && self.usage.is_none()
             && self.activity.is_none()
             && self.error.is_none()
+            && self.ask_question.is_none()
     }
 }
 
@@ -406,6 +413,13 @@ pub fn run_events_from_parsed(run_id: &str, parsed: ParsedLine) -> Vec<RunEvent>
         out.push(RunEvent::Error {
             run_id: run_id.to_owned(),
             message,
+        });
+    }
+    if let Some((request_id, questions)) = parsed.ask_question {
+        out.push(RunEvent::AskQuestion {
+            run_id: run_id.to_owned(),
+            request_id,
+            questions,
         });
     }
     out
