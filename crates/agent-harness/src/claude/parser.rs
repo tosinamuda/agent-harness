@@ -15,7 +15,10 @@
 
 use serde_json::Value;
 
-use crate::{ParsedLine, SessionInfo, ToolCallEnd, ToolCallStart, ToolKind, UsageInfo};
+use crate::{
+    ParsedLine, Question, QuestionOption, SessionInfo, ToolCallEnd, ToolCallStart, ToolKind,
+    UsageInfo,
+};
 
 /// Classify a Claude Code tool name into the neutral [`ToolKind`]. Claude
 /// reaches the consumer through `RunEvent`, so this classifier stays private
@@ -94,6 +97,13 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
                 if let Some(block) = event.get("content_block").and_then(Value::as_object) {
                     if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        // AskUserQuestion is surfaced as selectable chips (from
+                        // the aggregate `assistant` line below), not a tool card
+                        // — and headless Claude denies the tool, so its card
+                        // would only ever show as a failure. Suppress it.
+                        if name == "AskUserQuestion" {
+                            return ParsedLine::default();
+                        }
                         let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
                         // In streaming mode the tool's arguments are NOT here:
                         // `content_block_start` carries an empty `input: {}`,
@@ -199,10 +209,104 @@ pub fn parse_claude_line(line: &str) -> ParsedLine {
                 ..ParsedLine::default()
             }
         }
-        // Aggregate assistant lines: text already streamed via deltas, so
-        // ignore to avoid double-counting.
+        // Aggregate assistant lines: text already streamed via deltas, so we
+        // take ONLY a completed `AskUserQuestion` tool call from one — its full
+        // input is present here in a single piece — and ignore everything else
+        // (a double of already-streamed content).
+        Some("assistant") => {
+            let Some(content) = obj
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_array)
+            else {
+                return ParsedLine::default();
+            };
+            for item in content {
+                let Some(block) = item.as_object() else {
+                    continue;
+                };
+                if block.get("type").and_then(Value::as_str) != Some("tool_use")
+                    || block.get("name").and_then(Value::as_str) != Some("AskUserQuestion")
+                {
+                    continue;
+                }
+                let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
+                if let Some(questions) = block.get("input").and_then(parse_ask_user_question) {
+                    return ParsedLine {
+                        ask_question: Some((id.to_owned(), questions)),
+                        ..ParsedLine::default()
+                    };
+                }
+            }
+            ParsedLine::default()
+        }
+        // Any other line type carries nothing actionable.
         _ => ParsedLine::default(),
     }
+}
+
+/// Parse Claude's experimental `AskUserQuestion` tool input into neutral
+/// [`Question`]s. Defensive on purpose — the tool's shape is non-contractual,
+/// so a question missing its text or all its options is dropped rather than
+/// yielding a broken chip set; `None` means nothing usable was found (the run
+/// then falls back to Claude's own prose re-ask). Field map: `question` →
+/// `prompt`, `header`, `multiSelect` → `multi_select`, `options[].label` /
+/// `.description`; `allowFreeText` defaults to false.
+fn parse_ask_user_question(input: &Value) -> Option<Vec<Question>> {
+    let raw = input.get("questions").and_then(Value::as_array)?;
+    let mut questions = Vec::new();
+    for question in raw {
+        let Some(prompt) = question
+            .get("question")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        let options: Vec<QuestionOption> = question
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|opts| {
+                opts.iter()
+                    .filter_map(|opt| {
+                        let label = opt
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.is_empty())?;
+                        Some(QuestionOption {
+                            label: label.to_owned(),
+                            description: opt
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .filter(|text| !text.is_empty())
+                                .map(str::to_owned),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if options.is_empty() {
+            continue;
+        }
+        questions.push(Question {
+            header: question
+                .get("header")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned),
+            prompt: prompt.to_owned(),
+            options,
+            multi_select: question
+                .get("multiSelect")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            allow_free_text: question
+                .get("allowFreeText")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        });
+    }
+    (!questions.is_empty()).then_some(questions)
 }
 
 /// Non-empty string field of `obj`, else `None`.
@@ -374,5 +478,78 @@ mod tests {
         // Unlike bob, Claude's stream-json is always JSON; a stray
         // line should be dropped, not surfaced as assistant text.
         assert!(parse_claude_line("not json").text.is_none());
+    }
+
+    // Grounded in a live `claude -p --output-format stream-json` probe: the
+    // aggregate `assistant` line carries the AskUserQuestion tool_use with its
+    // full input in one piece.
+    fn ask_question_assistant_line(id: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{
+                "type": "tool_use",
+                "id": id,
+                "name": "AskUserQuestion",
+                "input": { "questions": [{
+                    "question": "Where should you go for your weekend trip?",
+                    "header": "Destination",
+                    "multiSelect": false,
+                    "options": [
+                        { "label": "The mountains", "description": "Hiking and fresh air." },
+                        { "label": "The beach", "description": "Sun and sand." }
+                    ]
+                }]}
+            }]}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn ask_user_question_assistant_line_becomes_ask_question() {
+        let parsed = parse_claude_line(&ask_question_assistant_line("toolu_q1"));
+        let (request_id, questions) = parsed.ask_question.clone().expect("ask_question");
+        assert_eq!(request_id, "toolu_q1");
+        assert_eq!(questions.len(), 1);
+        let question = &questions[0];
+        assert_eq!(question.prompt, "Where should you go for your weekend trip?");
+        assert_eq!(question.header.as_deref(), Some("Destination"));
+        assert!(!question.multi_select);
+        assert!(!question.allow_free_text);
+        assert_eq!(question.options.len(), 2);
+        assert_eq!(question.options[0].label, "The mountains");
+        assert_eq!(question.options[0].description.as_deref(), Some("Hiking and fresh air."));
+        // The aggregate line must not also double the streamed text / a card.
+        assert!(parsed.text.is_none());
+        assert!(parsed.tool_start.is_none());
+    }
+
+    #[test]
+    fn ask_user_question_card_is_suppressed() {
+        // The streamed tool_use start for AskUserQuestion is NOT a tool card —
+        // it renders as chips, and headless Claude denies the tool.
+        let line = serde_json::json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "content_block": { "type": "tool_use", "name": "AskUserQuestion", "id": "toolu_q1" }
+            }
+        })
+        .to_string();
+        assert!(parse_claude_line(&line).is_empty());
+    }
+
+    #[test]
+    fn malformed_ask_user_question_is_dropped() {
+        // A question with no usable options is unusable → no event (the run
+        // falls back to Claude's prose re-ask), never a broken chip set.
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{
+                "type": "tool_use", "id": "toolu_x", "name": "AskUserQuestion",
+                "input": { "questions": [{ "question": "Pick one?", "options": [] }] }
+            }]}
+        })
+        .to_string();
+        assert!(parse_claude_line(&line).ask_question.is_none());
     }
 }
