@@ -46,11 +46,12 @@ impl Harness for BobHarness {
             description: "IBM's bob agent CLI. Runs locally via Node.js.".to_owned(),
             requires_install: true,
             capabilities: HarnessCapabilities {
-                // Compose stores bob's API key, and bob proposes
-                // previewable edits the user approves. It exposes no
-                // model / effort / turn-cap knobs in the picker today.
+                // Compose stores bob's API key. bob runs edit-capable in
+                // `auto_edit` (see `run`), so it writes files directly like
+                // Claude/Codex — the host reviews via its edit gate, not an
+                // in-stream preview. It exposes no model/effort/turn-cap knobs.
                 credential_required: true,
-                previews_edits: true,
+                previews_edits: false,
                 models: Vec::new(),
                 allows_custom_model: false,
                 supports_effort: false,
@@ -94,9 +95,15 @@ impl Harness for BobHarness {
                 // proposes file changes.
                 RunMode::Edit => BobChatMode::Code,
             },
-            // H2 threads the live approval/coin knobs through; bob's
-            // serde defaults are correct for the additive seam.
-            approval_mode: BobApprovalMode::Default,
+            // Edit mode auto-approves edit tools (bob's `auto_edit`, the
+            // analogue of Claude's `acceptEdits`) so the agent writes directly
+            // and the host reviews via its edit gate. Ask is read-only, so
+            // `default` is fine. A host wanting full bypass passes
+            // `--approval-mode yolo` through `extra_args` (last-wins).
+            approval_mode: match request.mode {
+                RunMode::Edit => BobApprovalMode::AutoEdit,
+                RunMode::Ask => BobApprovalMode::Default,
+            },
             max_coins: 30,
             cwd: request.cwd,
             bob_executable: None,
@@ -117,12 +124,27 @@ impl Harness for BobHarness {
         // stateful. Hold one `BobStreamParser` for the whole run; the
         // stdout reader thread drives it sequentially, the `Mutex` just
         // satisfies the `Fn + Send + Sync` callback bound.
+        // In Edit mode bob runs `auto_edit` (above), so it *applies* edits
+        // rather than proposing them. Drop the parser's SuggestedEdits in that
+        // mode: an applied write is not a proposal, so it must not surface as
+        // an accept/reject suggestion (that would double with the host's edit
+        // gate / diff). The same `write_to_file`'s ToolStart/ToolEnd (Write) is
+        // retained, so it still shows as a file-op — consistent with how
+        // Claude/Codex applied writes appear. (Ask mode is read-only — no edits
+        // anyway — so the flag only ever matters in Edit mode.)
+        let edits_are_applied = matches!(request.mode, RunMode::Edit);
         let parser = Arc::new(Mutex::new(BobStreamParser::default()));
         let handle = spawn_bob(opts, request.run_id, move |event| {
             // Recover a poisoned lock rather than panic on the reader thread —
             // parsing is total, so the held parser is never mid-corruption.
             let mut parser = parser.lock().unwrap_or_else(|p| p.into_inner());
-            for normalized in normalize_process_event(event, |line| parser.parse_line(line)) {
+            for normalized in normalize_process_event(event, |line| {
+                let mut parsed = parser.parse_line(line);
+                if edits_are_applied {
+                    parsed.edits.clear();
+                }
+                parsed
+            }) {
                 (*on_event)(normalized);
             }
         })

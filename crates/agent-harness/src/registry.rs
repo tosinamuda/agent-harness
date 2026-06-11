@@ -144,7 +144,9 @@ mod tests {
         let caps = |id: &str| harness_by_id(id).unwrap().info().capabilities;
 
         let bob = caps("bob");
-        assert!(bob.credential_required && bob.previews_edits);
+        // bob stores a key (credential_required) but, running in auto_edit,
+        // writes directly like the others — so previews_edits is false too.
+        assert!(bob.credential_required && !bob.previews_edits);
         assert!(bob.models.is_empty() && !bob.supports_effort && !bob.supports_max_turns);
         assert_eq!(
             bob.credential_required,
