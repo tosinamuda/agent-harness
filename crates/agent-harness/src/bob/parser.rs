@@ -190,6 +190,11 @@ pub fn parse_bob_line(line: &str) -> ParsedLine {
 #[derive(Debug, Default)]
 pub struct BobStreamParser {
     in_thinking: bool,
+    /// True while inside a `[using tool …]` narration echo whose closing `]`
+    /// has not yet arrived — bob prints that echo inline right before each
+    /// structured `tool_use`, so it's redundant with the ToolStart card and is
+    /// dropped. The echo can span deltas, so the state carries across lines.
+    suppressing_echo: bool,
 }
 
 impl BobStreamParser {
@@ -200,7 +205,10 @@ impl BobStreamParser {
         let mut parsed = parse_bob_line(line);
         if let Some(content) = parsed.text.take() {
             let (text, thinking) = self.route_thinking(&content);
-            parsed.text = text;
+            // Drop bob's `[using tool …]` narration echo (redundant with the
+            // structured ToolStart card; may span deltas). Applied to the
+            // post-thinking visible text only.
+            parsed.text = text.and_then(|t| self.narration_after_echo(t));
             parsed.thinking = match (thinking, parsed.thinking.take()) {
                 (Some(a), Some(b)) => Some(a + &b),
                 (a, b) => a.or(b),
@@ -250,6 +258,30 @@ impl BobStreamParser {
             (!text.is_empty()).then_some(text),
             (!thinking.is_empty()).then_some(thinking),
         )
+    }
+
+    /// Drop bob's `[using tool …]` narration echo. bob prints it inline right
+    /// before the structured `tool_use` event, so it's redundant with the
+    /// ToolStart card. The echo can span deltas (its `]` arriving in a later
+    /// chunk), so `suppressing_echo` carries the drop across lines. Ported from
+    /// the pre-migration `BobChatMapper`.
+    fn narration_after_echo(&mut self, text: String) -> Option<String> {
+        if self.suppressing_echo {
+            // Still inside an unterminated echo — drop until its `]`.
+            if text.contains(']') {
+                self.suppressing_echo = false;
+            }
+            return None;
+        }
+        if text.trim_start().starts_with("[using tool") {
+            // Start of the echo. If its `]` isn't in this delta, keep dropping
+            // subsequent deltas until it arrives.
+            if !text.contains(']') {
+                self.suppressing_echo = true;
+            }
+            return None;
+        }
+        Some(text)
     }
 }
 
@@ -517,6 +549,33 @@ mod tests {
         );
         assert_eq!(parsed.text.as_deref(), Some("The answer is 42."));
         assert!(parsed.tool_start.is_none());
+    }
+
+    #[test]
+    fn using_tool_echo_is_dropped() {
+        // bob narrates each tool call inline as `[using tool …]` right before
+        // the structured tool_use; that echo is redundant with the ToolStart
+        // card and must not appear in the message text.
+        let mut parser = BobStreamParser::default();
+        let msg =
+            |c: &str| serde_json::json!({"type":"message","role":"assistant","content":c}).to_string();
+        assert!(parser.parse_line(&msg("[using tool write_to_file: notes/x.md]")).text.is_none());
+        // Surrounding narration still flows.
+        assert_eq!(parser.parse_line(&msg("All set.")).text.as_deref(), Some("All set."));
+    }
+
+    #[test]
+    fn chunked_using_tool_echo_is_dropped_across_deltas() {
+        // The echo's closing `]` can arrive in a later delta; suppression
+        // carries across lines until it does.
+        let mut parser = BobStreamParser::default();
+        let msg =
+            |c: &str| serde_json::json!({"type":"message","role":"assistant","content":c}).to_string();
+        assert!(parser.parse_line(&msg("[using tool read_file: a/very")).text.is_none());
+        assert!(parser.parse_line(&msg("/long/path.md")).text.is_none());
+        assert!(parser.parse_line(&msg("]")).text.is_none());
+        // Suppression ended; normal text resumes.
+        assert_eq!(parser.parse_line(&msg("ok")).text.as_deref(), Some("ok"));
     }
 
     #[test]

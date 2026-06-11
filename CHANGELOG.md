@@ -7,18 +7,17 @@ unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
-### Added
-- **`RunEvent::AskQuestion` — neutral interactive-question event (additive; no
-  adapter emits it yet).** When an agent asks the user a multiple-choice question
-  (Claude's `AskUserQuestion`, Codex's `tool/requestUserInput`), the adapter maps
-  it onto `AskQuestion { run_id, request_id, questions }` carrying neutral
-  `Question` / `QuestionOption` types, so a host renders chips without
-  name-checking a harness's tool — the way `ToolKind` already neutralizes tool
-  names. The answer travels back as the user's **next chat message** (the host's
-  existing send-path resumes the session), so this is one event, no new control
-  channel: `RunControl` is unchanged and no stdin write-back is involved. The
-  enum is already `#[non_exhaustive]`, so the new variant doesn't break consumers
-  with a `_` arm.
+## [0.3.3] - 2026-06-11
+
+### Fixed
+- **bob's `[using tool …]` narration echoes no longer leak into the message.**
+  The ported `BobStreamParser` had dropped `BobChatMapper`'s echo suppression, so
+  bob's inline `[using tool read_file: …]` / `[using tool write_to_file: …]`
+  lines surfaced as message text next to the real answer. Restored the
+  `suppressing_echo` state machine (it handles the echo spanning deltas), so only
+  `attempt_completion`'s result becomes the message text; `<thinking>` was already
+  routed to its own stream. Verified by replaying a real captured bob stream
+  through the parser (`examples/replay_bob.rs`).
 
 ## [0.3.2] - 2026-06-11
 
@@ -34,6 +33,16 @@ unreleased changes accumulate under **Unreleased** until the next release.
   `RunBobOptions.resume` into `--resume <id>` (bob accepts the session UUID).
   `None` → a fresh session. Additive: the field defaults `None`, so every
   existing caller is unaffected (set `resume: None`).
+- **`RunEvent::AskQuestion` — neutral interactive-question event.** When an agent
+  asks the user a multiple-choice question (Claude's `AskUserQuestion`), the
+  adapter maps it onto `AskQuestion { run_id, request_id, questions }` carrying
+  neutral `Question` / `QuestionOption` types, so a host renders chips without
+  name-checking a harness's tool — the way `ToolKind` already neutralizes tool
+  names. The Claude adapter emits it today; the answer travels back as the user's
+  **next chat message** (the host's existing send-path resumes the session), so
+  this is one event, no new control channel: `RunControl` is unchanged and no
+  stdin write-back is involved. The enum is `#[non_exhaustive]`, so the new
+  variant doesn't break consumers with a `_` arm.
 
 ### Changed
 - **bob runs direct-write (`auto_edit`) — no more previewable-edit proposals.**
