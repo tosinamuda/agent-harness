@@ -7,6 +7,23 @@ unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-06-12
+
+### Fixed
+- **bob's preamble narration no longer leaks above the answer.** Separate from
+  its `<thinking>` reasoning, bob streams prose narration — bold status headings
+  like `**Reading file…**` / `**Task completed successfully**` — inside assistant
+  `message`s, and the parser surfaced that prose as message text next to the real
+  answer. But bob's *answer* is always the `attempt_completion` result (verified
+  in code AND ask mode — the assistant `message` only ever carries reasoning +
+  preamble), so the `BobStreamParser` now folds **all** assistant-message content
+  (reasoning + narration) into the `thinking` stream and leaves only the
+  `attempt_completion` text as the visible message. A `tool_use` / non-message
+  line (the answer) keeps its text. Verified by replaying a real captured bob
+  stream (`examples/replay_bob.rs`): the visible text is exactly the answer; the
+  narration rides in the collapsed thinking trace. Completes the 0.3.3 echo fix
+  (the `[using tool …]` echo and the preamble prose were two separate leaks).
+
 ## [0.3.3] - 2026-06-11
 
 ### Fixed
