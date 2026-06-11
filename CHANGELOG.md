@@ -7,6 +7,18 @@ unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-06-11
+
+### Fixed
+- **bob's `[using tool …]` narration echoes no longer leak into the message.**
+  The ported `BobStreamParser` had dropped `BobChatMapper`'s echo suppression, so
+  bob's inline `[using tool read_file: …]` / `[using tool write_to_file: …]`
+  lines surfaced as message text next to the real answer. Restored the
+  `suppressing_echo` state machine (it handles the echo spanning deltas), so only
+  `attempt_completion`'s result becomes the message text; `<thinking>` was already
+  routed to its own stream. Verified by replaying a real captured bob stream
+  through the parser (`examples/replay_bob.rs`).
+
 ## [0.3.2] - 2026-06-11
 
 ### Added
