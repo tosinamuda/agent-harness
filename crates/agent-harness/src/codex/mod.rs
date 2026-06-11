@@ -130,8 +130,8 @@ impl Harness for CodexHarness {
     }
 
     fn run(&self, request: RunRequest, on_event: RunCallback) -> Result<RunHandle, HarnessError> {
-        let RunRequest { run_id, prompt, cwd, mode, tuning } = request;
-        let args = build_codex_args(prompt, mode, &tuning);
+        let RunRequest { run_id, prompt, cwd, mode, tuning, resume } = request;
+        let args = build_codex_args(prompt, mode, &tuning, resume.as_deref());
         let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         // No env injected — Codex uses its own auth. PATH augmentation
@@ -219,19 +219,30 @@ fn probe_codex_signed_in() -> bool {
 /// (codex's config override, value parsed as TOML); Codex has no
 /// turn-cap flag, so `tuning.max_turns` is intentionally ignored.
 /// Options precede the positional prompt, as `codex exec` expects.
-fn build_codex_args(prompt: String, mode: RunMode, tuning: &RunTuning) -> Vec<String> {
+fn build_codex_args(
+    prompt: String,
+    mode: RunMode,
+    tuning: &RunTuning,
+    resume: Option<&str>,
+) -> Vec<String> {
+    // `exec` always; `exec resume <id>` to continue a prior session instead of
+    // replaying history in the prompt. The session id is a positional *after*
+    // the options and *before* the prompt (`codex exec resume [OPTIONS]
+    // [SESSION_ID] [PROMPT]`), so it's appended at the tail below.
+    let mut args = vec!["exec".to_owned()];
+    if resume.is_some() {
+        args.push("resume".to_owned());
+    }
     // `--skip-git-repo-check`: `codex exec` otherwise refuses to run unless
     // the cwd is a git repo ("Not inside a trusted directory and
     // --skip-git-repo-check was not specified.", exit 1). A harness runs in
     // whatever working directory the consumer hands it — often not a git repo
     // (notes, drafts, a fresh folder) — so that interactive guardrail is
     // wrong here. This skips only the is-this-a-repo gate; the execution
-    // sandbox (mode → `--full-auto`) is unaffected.
-    let mut args = vec![
-        "exec".to_owned(),
-        "--json".to_owned(),
-        "--skip-git-repo-check".to_owned(),
-    ];
+    // sandbox (mode → `--full-auto`) is unaffected. Both flags are valid on
+    // `exec resume` too.
+    args.push("--json".to_owned());
+    args.push("--skip-git-repo-check".to_owned());
     if let Some(model) = tuning.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         args.push("--model".to_owned());
         args.push(model.to_owned());
@@ -246,8 +257,12 @@ fn build_codex_args(prompt: String, mode: RunMode, tuning: &RunTuning) -> Vec<St
         // vary by codex version; --full-auto is the stable one.)
         args.push("--full-auto".to_owned());
     }
-    // Host passthrough/overrides — before the trailing positional prompt.
+    // Host passthrough/overrides — before the trailing positionals.
     args.extend(tuning.extra_args.iter().cloned());
+    // Positionals last: the session id (resume only) precedes the prompt.
+    if let Some(session_id) = resume {
+        args.push(session_id.to_owned());
+    }
     args.push(prompt);
     args
 }
@@ -275,8 +290,9 @@ mod tests {
 
     #[test]
     fn codex_args_default_omit_model_and_effort() {
-        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &RunTuning::default());
+        let args = build_codex_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), None);
         assert_eq!(args[0], "exec");
+        assert!(!args.contains(&"resume".to_owned()));
         assert!(args.contains(&"--json".to_owned()));
         // Always present: a harness's cwd is often not a git repo, and
         // without this `codex exec` exits 1 ("Not inside a trusted
@@ -297,7 +313,7 @@ mod tests {
             max_turns: Some(5),
             ..RunTuning::default()
         };
-        let args = build_codex_args("hi".to_owned(), RunMode::Edit, &tuning);
+        let args = build_codex_args("hi".to_owned(), RunMode::Edit, &tuning, None);
         assert_eq!(flag_value(&args, "--model"), Some("gpt-5-codex"));
         assert_eq!(flag_value(&args, "-c"), Some("model_reasoning_effort=\"high\""));
         assert!(args.contains(&"--full-auto".to_owned()));
@@ -305,5 +321,19 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--max-turns"));
         // Options precede the prompt; the prompt stays last.
         assert_eq!(args.last().map(String::as_str), Some("hi"));
+    }
+
+    #[test]
+    fn codex_resume_uses_the_resume_subcommand_with_id_before_prompt() {
+        let args =
+            build_codex_args("hi".to_owned(), RunMode::Ask, &RunTuning::default(), Some("sess-9"));
+        // `exec resume` subcommand, JSON stream + git-skip still present.
+        assert_eq!(args[0], "exec");
+        assert_eq!(args[1], "resume");
+        assert!(args.contains(&"--json".to_owned()));
+        assert!(args.contains(&"--skip-git-repo-check".to_owned()));
+        // Positionals: the session id immediately precedes the prompt (tail).
+        let last_two = &args[args.len() - 2..];
+        assert_eq!(last_two, &["sess-9".to_owned(), "hi".to_owned()]);
     }
 }

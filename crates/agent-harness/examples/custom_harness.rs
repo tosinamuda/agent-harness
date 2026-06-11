@@ -188,6 +188,7 @@ fn main() -> Result<(), String> {
             cwd: None,
             mode: RunMode::Ask,
             tuning: RunTuning::default(),
+            resume: None,
         },
         on_event,
     )

@@ -104,6 +104,9 @@ impl Harness for BobHarness {
             // adapters honor, so a client applies a flag uniformly across all
             // three harnesses (bob appends it to its own argv).
             extra_args: request.tuning.extra_args,
+            // Continue a prior session instead of replaying history — the same
+            // RunRequest.resume the claude/codex adapters honor (`bob -r <id>`).
+            resume: request.resume,
         };
         // bob emits its own process events (lifecycle + raw stream-json
         // stdout lines). Normalize each into zero or more harness-neutral

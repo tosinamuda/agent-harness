@@ -7,7 +7,20 @@ unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-06-10
+## [0.3.2] - 2026-06-11
+
+### Added
+- **`RunRequest.resume` — continue a prior CLI session.** A host can pass the
+  session id captured from an earlier run's init (`RunEvent::Session` /
+  `SessionInfo`) to **resume that conversation** instead of replaying a
+  transcript in the prompt, so the CLI supplies the history (full fidelity,
+  fewer tokens). **All three adapters honor it uniformly**, the same way they do
+  `extra_args`: Claude maps it to `--resume <id>`; Codex restructures to
+  `codex exec resume <id> … <prompt>` (the id is a positional before the prompt,
+  `--json`/`--skip-git-repo-check` still apply); bob threads it through
+  `RunBobOptions.resume` into `--resume <id>` (bob accepts the session UUID).
+  `None` → a fresh session. Additive: the field defaults `None`, so every
+  existing caller is unaffected (set `resume: None`).
 
 ### Added
 - **Host-controlled CLI args via `RunTuning.extra_args`.** A host can pass raw
