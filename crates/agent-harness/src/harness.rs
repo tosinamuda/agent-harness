@@ -234,6 +234,12 @@ pub struct RunRequest {
     /// Optional, harness-neutral run-shaping knobs (model, effort,
     /// turn cap). Adapters honor the subset their CLI supports.
     pub tuning: RunTuning,
+    /// Session id to **resume** — continue a prior run's conversation instead
+    /// of starting fresh, so the CLI supplies the history (no transcript replay
+    /// in the prompt). `None` → a new session. Each adapter maps it to its
+    /// CLI's resume form (Claude `--resume <id>`, codex `exec resume <id>`,
+    /// bob `-r <id>`); the id comes from the earlier run's init `SessionInfo`.
+    pub resume: Option<String>,
 }
 
 /// Where a harness's secret lives in the OS keychain, and how to
@@ -395,6 +401,7 @@ pub trait Harness: Send + Sync {
     ///     cwd: None,
     ///     mode: RunMode::Ask,
     ///     tuning: RunTuning::default(),
+    ///     resume: None,
     /// })?;
     /// for event in rx {
     ///     match event {
@@ -573,6 +580,7 @@ mod tests {
             cwd: None,
             mode: RunMode::Ask,
             tuning: RunTuning::default(),
+            resume: None,
         }
     }
 

@@ -96,6 +96,7 @@ fn request() -> RunRequest {
         cwd: None,
         mode: RunMode::Ask,
         tuning: RunTuning::default(),
+        resume: None,
     }
 }
 

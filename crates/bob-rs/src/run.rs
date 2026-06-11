@@ -84,6 +84,11 @@ pub struct RunBobOptions {
     /// a client can apply a flag uniformly across harnesses. Default empty.
     #[serde(default)]
     pub extra_args: Vec<String>,
+    /// Session id to **resume** (`-r <id>`) instead of starting fresh — continue
+    /// a prior conversation so bob supplies the history rather than the caller
+    /// replaying a transcript. `None` → a new session. Default `None`.
+    #[serde(default)]
+    pub resume: Option<String>,
 }
 
 fn default_chat_mode() -> BobChatMode { BobChatMode::Ask }
@@ -156,6 +161,12 @@ fn build_args(opts: &RunBobOptions) -> Vec<String> {
         "--max-coins".to_owned(),
         opts.max_coins.to_string(),
     ];
+    // Continue a prior session instead of starting fresh (bob accepts the
+    // session UUID, per `--resume {number|uuid|latest}`).
+    if let Some(session_id) = &opts.resume {
+        args.push("--resume".to_owned());
+        args.push(session_id.clone());
+    }
     // Host passthrough, appended verbatim after bob's own argv.
     args.extend(opts.extra_args.iter().cloned());
     args
@@ -174,6 +185,7 @@ mod tests {
             cwd: None,
             bob_executable: None,
             extra_args,
+            resume: None,
         }
     }
 
@@ -191,5 +203,16 @@ mod tests {
     fn build_args_with_no_extra_is_unchanged() {
         let args = build_args(&opts(Vec::new()));
         assert_eq!(args.last().map(String::as_str), Some("30"));
+    }
+
+    #[test]
+    fn build_args_resume_adds_session_flag() {
+        let mut o = opts(Vec::new());
+        o.resume = Some("sess-7".to_owned());
+        let args = build_args(&o);
+        let i = args.iter().position(|a| a == "--resume").expect("--resume");
+        assert_eq!(args.get(i + 1).map(String::as_str), Some("sess-7"));
+        // The prompt positional is still first.
+        assert_eq!(args.first().map(String::as_str), Some("hi"));
     }
 }

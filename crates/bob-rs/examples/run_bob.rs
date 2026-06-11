@@ -24,6 +24,7 @@ fn main() -> Result<(), BobError> {
             cwd: None,            // defaults to the current directory
             bob_executable: None, // defaults to `bob` on PATH
             extra_args: Vec::new(),
+            resume: None, // Some(session_id) to continue a prior run
         },
         "demo".into(),
         move |ev| {
