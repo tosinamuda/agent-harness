@@ -1,13 +1,13 @@
 //! Run a prompt against the bob adapter and stream the normalized events.
 //!
-//! `BOBSHELL_API_KEY=… cargo run --example run_bob --features bob`
+//! `BOBSHELL_API_KEY=… cargo run --example run_bob_harness --features bob`
 //!
 //! Doubles as the live regression check for the node-pairing fix: run it
 //! with an incompatible node deliberately leading the PATH —
 //!
 //! ```sh
 //! PATH="$HOME/.nvm/versions/node/v20.19.2/bin:$PATH" \
-//!   BOBSHELL_API_KEY=… cargo run --example run_bob --features bob
+//!   BOBSHELL_API_KEY=… cargo run --example run_bob_harness --features bob
 //! ```
 //!
 //! Pre-fix, bob (installed under a v24 nvm dir) was re-exec'd on the v20
