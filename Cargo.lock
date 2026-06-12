@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "agent-harness"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "bob-rs",
  "cli-stream",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "bob-rs"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "cli-stream",
  "dirs",
@@ -248,10 +248,11 @@ dependencies = [
 
 [[package]]
 name = "cli-stream"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "libc",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

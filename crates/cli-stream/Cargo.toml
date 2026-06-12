@@ -27,3 +27,8 @@ thiserror.workspace = true
 # Windows uses `Child::kill()` (TerminateProcess).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# The program/PATH resolver tests create throwaway executable files in a
+# temp dir to exercise the executable-bit filter.
+tempfile = "3"

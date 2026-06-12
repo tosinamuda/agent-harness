@@ -7,6 +7,29 @@ unreleased changes accumulate under **Unreleased** until the next release.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-06-12
+
+### Fixed
+- **Node-CLI spawns are paired with the node they were installed under.**
+  `cli-stream` now resolves a bare program name (`bob`, `claude`, …) to its
+  absolute path on the augmented PATH before spawning (`resolve_program`,
+  exported), so the engine's program-dir prepend actually fires and the child's
+  `#!/usr/bin/env node` picks the **sibling node from the CLI's own install
+  dir** — not whichever node happens to lead the inherited PATH. Previously a
+  bare name split the brain: the OS found bob under an nvm v24 dir while the
+  child PATH led with v20, and bob's self-re-exec died on a newer-node-only
+  flag (`--disable-sigusr1`) as an opaque "exited with code 9". Verified
+  end-to-end by running bob through the harness with v20 deliberately first on
+  PATH (`agent-harness/examples/run_bob.rs`).
+- **bob runs preflight the Node version with a typed error.** `bob-rs`'s
+  `spawn_bob` now checks the node that will actually execute bob (sibling
+  first, else first on PATH) against `BOB_MIN_NODE_VERSION` and returns the new
+  `BobError::NodeIncompatible` — "bob requires Node.js 22.15.0+ — found
+  v20.19.2 at …" — instead of letting the child die with exit code 9. Additive
+  (`BobError` is `#[non_exhaustive]`). Note: bobshell's own `engines` field
+  claims `>=20.0.0`, but its runtime re-exec requires ≥22.12 in practice — the
+  SDK constant is the empirically correct floor.
+
 ## [0.3.4] - 2026-06-12
 
 ### Fixed
